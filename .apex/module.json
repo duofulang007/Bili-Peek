@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "bili-peek",
+  "projectId": "bili-peek",
+  "projectName": "Bili-Peek",
+  "projectDescription": "B站词云与弹幕密度图；启动本地片段助手，将视频与字幕保存到 Obsidian。",
+  "name": "Obsidian 片段助手",
+  "version": "0.3.20",
+  "projectRoot": ".",
+  "requiresAdmin": false,
+  "singleInstance": true,
+  "timeoutSeconds": 30,
+  "actions": {
+    "run": {
+      "program": "powershell.exe",
+      "cwd": "{project_root}",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "{module_dir}\\runner.ps1", "-Action", "run", "-ResultPath", "{result_path}"]
+    },
+    "stop": {
+      "program": "powershell.exe",
+      "cwd": "{project_root}",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "{module_dir}\\runner.ps1", "-Action", "stop", "-ResultPath", "{result_path}"]
+    }
+  }
+}

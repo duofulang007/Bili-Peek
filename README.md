@@ -121,10 +121,19 @@ node helper/benchmark-export.cjs
 | `Bili-Peek.user.js` | 用户脚本、双图、选区和助手配对 |
 | `helper/` | 本地助手、媒体导出、安装与维护工具 |
 | `obsidian-plugin/` | Obsidian 阅读播放器插件 |
+| `.apex/` | ControlPod 项目卡片清单与助手启停适配器 |
 | `tests/` | Node 测试、预览与合成数据基准 |
 | `docs/`、`初稿方案.md` | 历史设计与概念演示，不代表已实现功能 |
 
 `.local/`、`.tools/`、`node_modules/`、`tests/artifacts/` 与 `tests/export-sandbox/` 已由 `.gitignore` 排除，包含配对配置、工具或生成产物，不应提交。
+
+## ControlPod 项目卡片
+
+项目内的 `.apex/module.json` 提供“Obsidian 片段助手”模块。仓库放在总控台扫描的项目目录（默认 `D:\Projects`）后，完全退出并重新打开 ControlPod，自动出现 **Bili-Peek** 项目卡片。
+
+卡片支持启动、关闭与重启本地助手，复用已有配置和 Node 环境。重复启动不会创建第二个助手；关闭前核对进程身份与健康状态，正在保存片段时拒绝关闭。卡片不安装油猴脚本，也不控制浏览器。首次使用仍需完成上面的配置与配对。
+
+可运行 `powershell -NoProfile -ExecutionPolicy Bypass -File tests/controlpod-smoke.ps1` 验证实际启动、重复启动与关闭；测试结束恢复助手原来的运行状态。仅在没有片段正在保存时运行。
 
 ## 源码同步
 

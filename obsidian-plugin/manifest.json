@@ -1,0 +1,9 @@
+{
+  "id": "bili-peek-player",
+  "name": "Bili-Peek Player",
+  "version": "1.3.0",
+  "minAppVersion": "1.5.0",
+  "description": "Click paragraph times to seek the embedded Bili-Peek video in Reading view.",
+  "author": "Bili-Peek",
+  "isDesktopOnly": false
+}

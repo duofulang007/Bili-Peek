@@ -1,0 +1,3 @@
+const http=require('node:http'),fs=require('node:fs'),path=require('node:path');
+const routes={'/':'concept.html','/concept.html':'concept.html','/implementation-map.html':'implementation-map.html','/plan':'实现路径.md'};
+http.createServer((req,res)=>{const name=routes[new URL(req.url,'http://localhost').pathname];if(!name){res.writeHead(404);return res.end('Not found');}res.setHeader('Content-Type',name.endsWith('.md')?'text/plain; charset=utf-8':'text/html; charset=utf-8');fs.createReadStream(path.join(__dirname,name)).pipe(res);}).listen(8766,'127.0.0.1',()=>console.log('Concept: http://127.0.0.1:8766/'));

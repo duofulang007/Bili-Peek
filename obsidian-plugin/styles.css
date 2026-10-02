@@ -1,0 +1,28 @@
+.markdown-rendered button.bili-peek-time {
+  background: transparent; border: 0; box-shadow: none; padding: 2px 0;
+  height: auto; font: inherit; font-weight: 600; color: var(--text-muted);
+  cursor: pointer; font-variant-numeric: tabular-nums;
+}
+.markdown-rendered button.bili-peek-time:hover,
+.markdown-rendered button.bili-peek-time.is-selected { color: var(--text-accent); }
+.markdown-rendered button.bili-peek-time:focus-visible {
+  outline: 2px solid var(--text-accent); outline-offset: 3px; border-radius: 3px;
+}
+.markdown-rendered .bili-peek-original { display: none !important; }
+.markdown-rendered .bili-peek-reader {
+  display: flex; flex-direction: column; height: min(72vh, 760px); min-height: 280px;
+  border: 1px solid var(--background-modifier-border); border-radius: 8px;
+  overflow: hidden; background: var(--background-primary); margin: 14px 0 24px;
+}
+.markdown-rendered .bili-peek-reader > video {
+  flex: none; display: block; width: 100%; height: min(32vh, 320px); min-height: 100px;
+  object-fit: contain; margin: 0; background: #000; border-radius: 0;
+}
+.markdown-rendered .bili-peek-transcript {
+  flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  padding: 18px 22px; scrollbar-gutter: stable; line-height: 1.8;
+}
+.markdown-rendered .bili-peek-paragraph { margin-bottom: 22px; }
+.markdown-rendered .bili-peek-paragraph:last-child { margin-bottom: 0; }
+.markdown-rendered .bili-peek-paragraph p { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 480px) { .markdown-rendered .bili-peek-transcript { padding: 14px 16px; } }

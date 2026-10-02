@@ -1,0 +1,5 @@
+node_modules/
+tests/artifacts/
+.local/
+.tools/
+tests/export-sandbox/

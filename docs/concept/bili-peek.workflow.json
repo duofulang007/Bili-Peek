@@ -1,0 +1,29 @@
+{
+ "schema_version":2,"diagram_type":"workflow",
+ "meta":{"title":"Bili-Peek · 从弹幕统计到个人观看导航","locale":"zh-CN","quality_profile":"showcase"},
+ "lanes":[{"id":"watch","label":"观看体验 · 拟实现"},{"id":"build","label":"实现路径 · 本地优先"}],
+ "mainPath":["intent","topics","moments","proof"],
+ "nodes":[
+ {"id":"intent","lane":"watch","col":0,"type":"frontend","label":"选择关注点","sublabel":"购买 / 学习 / 精彩片段","width":190},
+ {"id":"topics","lane":"watch","col":1,"type":"frontend","label":"上图：话题地图","sublabel":"价格 · 兼容性 · 实测","width":190},
+ {"id":"moments","lane":"watch","col":2,"type":"frontend","label":"下图：讨论时间轴","sublabel":"相关段落 + 原有热度","width":190},
+ {"id":"proof","lane":"watch","col":3,"type":"frontend","label":"查看原话并定位","sublabel":"图内浮层 → 跳转视频","width":190},
+ {"id":"index","lane":"build","col":0,"type":"backend","label":"第一阶段：先不卡","sublabel":"缓存统计 / 时间桶索引","width":190},
+ {"id":"rules","lane":"build","col":1,"type":"backend","label":"第二阶段：个人关注","sublabel":"关键词组 / 本地偏好","width":190},
+ {"id":"worker","lane":"build","col":2,"type":"backend","label":"第三阶段：段落联动","sublabel":"后台分析 / 渐进更新","width":190},
+ {"id":"meaning","lane":"build","col":3,"type":"cloud","label":"第四阶段：可选理解","sublabel":"按需 AI / 原话可追溯","width":190}
+ ],
+ "edges":[
+ {"from":"intent","to":"topics","label":"按兴趣筛选"},
+ {"from":"topics","to":"moments","label":"点选话题"},
+ {"from":"moments","to":"proof","label":"选择时段"},
+ {"from":"index","to":"rules","label":"验证性能"},
+ {"from":"rules","to":"worker","label":"验证有用"},
+ {"from":"worker","to":"meaning","label":"再评估 AI","variant":"dashed"}
+ ],
+ "cards":[
+ {"dot":"cyan","title":"两图回答两个问题","items":["上图：这里有什么与我相关？","下图：相关讨论在哪里出现？"]},
+ {"dot":"emerald","title":"脚本可以实现的核心","items":["关注词归组、时间筛选和跳转","个人预设保存在本机；不必接 AI"]},
+ {"dot":"amber","title":"性能与可信度边界","items":["首次分析异步做；点击读取索引","话题是规则匹配；观点不是事实"]}
+ ]
+}

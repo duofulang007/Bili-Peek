@@ -1,0 +1,146 @@
+<!doctype html><meta charset="utf-8"><style>body{margin:0;background:#19191b;color:#ddd;font:16px/1.7 system-ui;--text-muted:#999;--text-accent:#829eed;--background-primary:#202023;--background-modifier-border:#39393d}.markdown-preview-view{max-width:850px;margin:auto;padding:24px}h1{font-size:22px}h2{font-size:18px}.markdown-rendered button.bili-peek-time {
+  background: transparent; border: 0; box-shadow: none; padding: 2px 0;
+  height: auto; font: inherit; font-weight: 600; color: var(--text-muted);
+  cursor: pointer; font-variant-numeric: tabular-nums;
+}
+.markdown-rendered button.bili-peek-time:hover,
+.markdown-rendered button.bili-peek-time.is-selected { color: var(--text-accent); }
+.markdown-rendered button.bili-peek-time:focus-visible {
+  outline: 2px solid var(--text-accent); outline-offset: 3px; border-radius: 3px;
+}
+.markdown-rendered .bili-peek-original { display: none !important; }
+.markdown-rendered .bili-peek-reader {
+  display: flex; flex-direction: column; height: min(72vh, 760px); min-height: 280px;
+  border: 1px solid var(--background-modifier-border); border-radius: 8px;
+  overflow: hidden; background: var(--background-primary); margin: 14px 0 24px;
+}
+.markdown-rendered .bili-peek-reader > video {
+  flex: none; display: block; width: 100%; height: min(32vh, 320px); min-height: 100px;
+  object-fit: contain; margin: 0; background: #000; border-radius: 0;
+}
+.markdown-rendered .bili-peek-transcript {
+  flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  padding: 18px 22px; scrollbar-gutter: stable; line-height: 1.8;
+}
+.markdown-rendered .bili-peek-paragraph { margin-bottom: 22px; }
+.markdown-rendered .bili-peek-paragraph:last-child { margin-bottom: 0; }
+.markdown-rendered .bili-peek-paragraph p { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 480px) { .markdown-rendered .bili-peek-transcript { padding: 14px 16px; } }
+</style><main class="markdown-preview-view markdown-rendered"><h1>视频片段笔记 · 本地布局验收</h1><div id="section"><h2>片段字幕</h2></div></main><script>let module={exports:{}};let processor;const require=()=>({Plugin:class{registerMarkdownPostProcessor(fn){processor=fn}registerDomEvent(doc,type,fn){doc.addEventListener(type,fn)}},Notice:class{constructor(text){console.log(text)}}});const { Plugin, Notice } = require('obsidian');
+
+function seconds(text) {
+  if (!/^\d{2,}:\d{2}(?::\d{2})?$/.test(text)) return null;
+  const parts = text.split(':').map(Number);
+  if (parts.slice(1).some(n => n > 59)) return null;
+  return parts.reduce((total, n) => total * 60 + n, 0);
+}
+
+function seek(video, time) {
+  if (!Number.isFinite(video.duration) || video.duration <= 0 || time > video.duration) return false;
+  const paused = video.paused;
+  video.currentTime = time;
+  if (paused) video.pause();
+  return true;
+}
+
+function paragraphs(source) {
+  const section = source.split('## 片段字幕')[1];
+  if (!section) return [];
+  return [...section.split(/\n## /)[0].matchAll(/\*\*(\d{2,}:\d{2}(?::\d{2})?)\*\*\s*\n([\s\S]*?)(?=\n\*\*\d{2,}:\d{2}(?::\d{2})?\*\*|$)/g)]
+    .map(match => ({ label: match[1], time: seconds(match[1]), text: match[2].trim() })).filter(item => item.time !== null && item.text);
+}
+
+function makeReader(items, resource) {
+  const reader = document.createElement('section'); reader.className = 'bili-peek-reader';
+  reader.setAttribute('aria-label', '视频和片段字幕');
+  const video = document.createElement('video'); video.src = resource; video.controls = true; video.preload = 'metadata'; video.playsInline = true;
+  const transcript = document.createElement('div'); transcript.className = 'bili-peek-transcript'; transcript.tabIndex = 0; transcript.setAttribute('aria-label', '片段字幕，独立滚动');
+  for (const item of items) {
+    const paragraph = document.createElement('div'); paragraph.className = 'bili-peek-paragraph';
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'bili-peek-time'; button.textContent = item.label;
+    button.title = `跳转片段到 ${item.label}`; button.dataset.seconds = String(item.time); button.dataset.resource = resource;
+    const text = document.createElement('p'); text.textContent = item.text;
+    paragraph.append(button, text); transcript.append(paragraph);
+  }
+  reader.append(video, transcript); return reader;
+}
+
+module.exports = class BiliPeekPlayer extends Plugin {
+  onload() {
+    this.layouts = new Map();
+    this.registerMarkdownPostProcessor(async (element, context) => {
+      const file = this.app.vault.getAbstractFileByPath(context.sourcePath);
+      if (!file) return;
+      const source = await this.app.vault.cachedRead(file);
+      const match = source.match(/!\[\[(Bili-Peek附件\/[a-f0-9]{20}\.mp4)\]\]/);
+      if (!match || !source.includes('## 片段字幕')) return;
+      const asset = this.app.metadataCache.getFirstLinkpathDest(match[1], context.sourcePath);
+      if (!asset) return;
+      const resource = this.app.vault.getResourcePath(asset);
+      const items = paragraphs(source);
+      const root = element.closest('.markdown-preview-view');
+      if (root && items.length) {
+        const heading = [...element.querySelectorAll('h2')].find(item => item.textContent.trim() === '片段字幕');
+        if (heading && !root.querySelector('.bili-peek-reader')) {
+          const reader = makeReader(items, resource); heading.after(reader);
+          const hidden = new Set();
+          const originalTexts = new Set(items.flatMap(item => [item.label, item.text]));
+          const hideOriginals = () => {
+            for (const paragraph of root.querySelectorAll('p')) {
+              if (paragraph.closest('.bili-peek-reader')) continue;
+              const originalVideo = [...paragraph.querySelectorAll('video')].find(video => (video.currentSrc || video.src) === resource);
+              if (originalVideo || originalTexts.has(paragraph.textContent.trim()) || paragraph.textContent.startsWith('时间以片段起点为 00:00。')) {
+                if (originalVideo) originalVideo.pause();
+                paragraph.classList.add('bili-peek-original'); hidden.add(paragraph);
+              }
+            }
+          };
+          hideOriginals();
+          const observer = new MutationObserver(hideOriginals); observer.observe(root, { childList: true, subtree: true });
+          const previous = this.layouts.get(root); if (previous) { previous.observer.disconnect(); previous.hidden.forEach(item => item.classList.remove('bili-peek-original')); }
+          this.layouts.set(root, { reader, observer, hidden });
+        }
+        if (root.querySelector('.bili-peek-reader')) return;
+      }
+      for (const strong of element.querySelectorAll('p > strong')) {
+        const time = seconds(strong.textContent.trim());
+        if (time === null || strong.parentElement.textContent.trim() !== strong.textContent.trim()) continue;
+        const button = document.createElement('button');
+        button.className = 'bili-peek-time'; button.textContent = strong.textContent;
+        button.type = 'button'; button.title = `跳转片段到 ${strong.textContent}`;
+        button.dataset.seconds = String(time); button.dataset.resource = resource;
+        strong.replaceWith(button);
+      }
+    });
+    this.registerDomEvent(document, 'click', event => {
+      const button = event.target.closest?.('button.bili-peek-time');
+      if (!button) return;
+      event.preventDefault(); event.stopPropagation();
+      const root = button.closest('.markdown-preview-view, .markdown-rendered');
+      const reader = button.closest('.bili-peek-reader');
+      const video = [...((reader || root)?.querySelectorAll('video') || [])].find(item => (item.currentSrc || item.src) === button.dataset.resource);
+      if (!video) { new Notice('当前笔记的视频尚未显示，请先打开视频所在位置。'); return; }
+      if (!seek(video, Number(button.dataset.seconds))) {
+        new Notice('视频尚未加载完成，或时间超出片段范围，请稍后重试。'); return;
+      }
+      if (!reader) video.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+      root.querySelectorAll('.bili-peek-time.is-selected').forEach(item => item.classList.remove('is-selected'));
+      button.classList.add('is-selected');
+    });
+  }
+  onunload() {
+    for (const { reader, observer, hidden } of this.layouts.values()) {
+      observer.disconnect(); reader.remove(); hidden.forEach(item => item.classList.remove('bili-peek-original'));
+    }
+    this.layouts.clear();
+    document.querySelectorAll('button.bili-peek-time').forEach(button => {
+      const strong = document.createElement('strong'); strong.textContent = button.textContent; button.replaceWith(strong);
+    });
+  }
+};
+module.exports.seconds = seconds;
+module.exports.seek = seek;
+module.exports.paragraphs = paragraphs;
+module.exports.makeReader = makeReader;
+
+const plugin=new module.exports();plugin.app={vault:{getAbstractFileByPath:()=>({}),cachedRead:async()=>"![[Bili-Peek附件/aaaaaaaaaaaaaaaaaaaa.mp4]]\n\n## 片段字幕\n\n**00:00**\n\n第 1 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**00:05**\n\n第 2 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**00:10**\n\n第 3 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**00:15**\n\n第 4 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**00:20**\n\n第 5 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**00:25**\n\n第 6 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**00:30**\n\n第 7 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**00:35**\n\n第 8 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**00:40**\n\n第 9 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**00:45**\n\n第 10 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**00:50**\n\n第 11 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**00:55**\n\n第 12 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**01:00**\n\n第 13 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**01:05**\n\n第 14 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**01:10**\n\n第 15 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**01:15**\n\n第 16 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**01:20**\n\n第 17 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**01:25**\n\n第 18 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**01:30**\n\n第 19 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**01:35**\n\n第 20 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**01:40**\n\n第 21 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**01:45**\n\n第 22 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**01:50**\n\n第 23 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**01:55**\n\n第 24 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**02:00**\n\n第 25 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**02:05**\n\n第 26 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**02:10**\n\n第 27 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**02:15**\n\n第 28 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**02:20**\n\n第 29 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**02:25**\n\n第 30 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。",getResourcePath:()=>location.origin+'/silent.wav'},metadataCache:{getFirstLinkpathDest:()=>({})}};plugin.onload();processor(document.getElementById('section'),{sourcePath:'preview.md'});</script>

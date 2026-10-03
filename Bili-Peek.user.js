@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bili-Peek · 弹幕观看助手
 // @namespace    bili-peek
-// @version      0.3.20
+// @version      0.3.22
 // @description  视频右侧双图：弹幕词云与可点击跳转的密度图，推荐视频保留在下方。
 // @match        https://www.bilibili.com/video/*
 // @run-at       document-idle
@@ -243,17 +243,25 @@
       if (textCache.size < 2000) textCache.set(record.text, seen);
       for (const term of seen) frequency.set(term, (frequency.get(term) || 0) + 1);
     }
-    let terms = [...frequency].map(([text, count]) => ({ text, count })).filter(item => !phrases || item.count >= 2);
+    textCache.clear();
+    const terms = [];
+    for (const [text, count] of frequency) if (!phrases || count >= 2) terms.push({ text, count });
     if (phrases) {
-      // Phrase length is capped at 14: index proper substrings instead of comparing every pair.
+      // Retain only real candidates with the same count, not every possible substring.
       const nested = new Set();
       for (const { text, count } of terms) for (let start = 0; start < text.length - 2; start++) {
         for (let end = start + 3; end <= text.length; end++) {
-          if (end - start < text.length) nested.add(`${count}:${text.slice(start, end)}`);
+          if (end - start >= text.length) continue;
+          const shorter = text.slice(start, end);
+          if (frequency.get(shorter) === count) nested.add(shorter);
         }
       }
-      terms = terms.filter(item => !nested.has(`${item.count}:${item.text}`));
+      // Compact in place so filtering doesn't allocate a second candidate array.
+      let kept = 0;
+      for (const term of terms) if (!nested.has(term.text)) terms[kept++] = term;
+      terms.length = kept;
     }
+    frequency.clear();
     const result = terms.sort((a, b) => b.count - a.count || b.text.length - a.text.length || a.text.localeCompare(b.text)).slice(0, 80)
       .map(item => ({ ...item, text: item.text.replace(/ddr(\d)/g, 'DDR$1').replace(/(\d+)gb/g, '$1GB').replace(/hbm|ecc|cpu|gpu|ram|ssd|tsv/g, value => value.toUpperCase()) }));
     if (!cached) { cached = new Map(); wordStatsCache.set(records, cached); }
@@ -983,6 +991,8 @@
     try {
       let entry = !force && cache.get(key);
       if (!entry || Date.now() - entry.at > 300000) {
+        // Keep only the current part; release the previous dataset before fetching.
+        cache.clear();
         const [id, part] = key.split(':p');
         // Prefer metadata already delivered with the page; never execute page script text.
         let pageData;
@@ -1007,18 +1017,20 @@
           for (const r of decoded.records) {
             if (r.id && ids.has(r.id)) continue;
             if (r.id) ids.add(r.id);
-            all.push(r);
+            // IDs are needed only during download deduplication, not by either chart.
+            all.push({ time: r.time, text: r.text, mode: r.mode, pool: r.pool });
           }
           if (all.length > 150000) throw new Error('弹幕超过 15 万条，暂不支持');
         }
+        if (!valid()) return;
         entry = { records: all, duration: page.duration, at: Date.now() };
-        cache.delete(key); cache.set(key, entry);
-        while (cache.size > 3) cache.delete(cache.keys().next().value);
+        cache.set(key, entry);
       }
       if (!valid()) return;
       records = entry.records; videoDuration = entry.duration;
       renderCharts(); status('');
     } catch (error) { if (valid()) loading(error.message, true); }
+    finally { if (dataRequest === controller) dataRequest = null; }
   }
 
   function onMediaState(event) {
@@ -1162,6 +1174,8 @@
     const key = routeKey(location.href);
     if (!key) {
       dataRequest?.abort(); dataRoute = null;
+      cache.clear(); records = []; chartData = null;
+      if (ui) { ui.cloud.replaceChildren(); ui.density.replaceChildren(); }
       restoreRail();
       bindMedia(null);
       host?.remove();
@@ -1264,7 +1278,12 @@
     observedPlayer = null;
     cancelSeek();
     dataRequest?.abort(); dataRoute = null;
+    dataRequest = null;
+    cache.clear(); records = []; chartData = null;
+    if (media) bindMedia(null);
+    if (ui) { ui.cloud.replaceChildren(); ui.density.replaceChildren(); }
     clearTimeout(scheduled);
+    scheduled = null;
   });
   window.addEventListener('pageshow', event => {
     if (event.persisted) { observePage(); schedule(); }

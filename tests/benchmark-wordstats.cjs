@@ -28,7 +28,7 @@ function scan(index) {
   return [...new Set(rows.filter(r => r.time >= index && (r.time < index + 1 || (index === 159 && r.time === 160)) && r.mode <= 6 && r.text.normalize('NFKC').toLowerCase().replace(/\s+/g, '').includes('内存')).map(r => r.text))].slice(0, 3);
 }
 for (let i = 0; i < 160; i++) assert.deepEqual(chart.bins[i].samples, scan(i));
-if (before) assert.deepEqual(chart.bins.map(({ samples, ...bin }) => bin), before.density(rows, 160, '内存').bins);
+if (before) assert.deepEqual(chart.bins.map(({ samples, ...bin }) => bin), before.density(rows, 160, '内存').bins.map(({ samples, ...bin }) => bin));
 const beforeMs = measure(() => { for (let i = 0; i < 160; i++) scan(i); });
 const afterMs = measure(() => { for (let i = 0; i < 160; i++) chart.bins[i].samples.map(text => text.slice(0, 48)).join('\n'); });
 console.log(JSON.stringify({ label: 'tooltip/160 moves', records: rows.length, beforeMs, afterMs, setupMs: measure(() => after.density(rows, 160, '内存')) }));

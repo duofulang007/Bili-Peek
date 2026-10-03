@@ -9,8 +9,8 @@ document.getElementById('run-tests').addEventListener('click', async () => {
   const log = text => { lines.push(text); results.textContent = lines.join('\n'); };
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
   const expect = (condition, message) => { if (!condition) throw new Error(message); passed++; log('✓ ' + message); };
-  const until = async (predicate, message) => {
-    const deadline = performance.now() + 6000;
+  const until = async (predicate, message, timeout = 6000) => {
+    const deadline = performance.now() + timeout;
     while (!predicate() && performance.now() < deadline) await wait(30);
     if (!predicate()) throw new Error(message);
   };
@@ -51,11 +51,11 @@ document.getElementById('run-tests').addEventListener('click', async () => {
     }
     const root = panel().shadowRoot, recommendations = document.querySelector('.recommend-list-v1');
     await wait(300);
-    window.fixtureMenus['复制 Bili-Peek 排错信息']();
+    window.fixtureMenus['复制排错信息']();
     const reconcilesBefore = window.fixtureDiagnostic.counters.reconciles;
     const animated = document.createElement('div'); document.getElementById('bilibili-player').append(animated);
     for (let i = 0; i < 100; i++) { const text = document.createElement('span'); text.textContent = '模拟弹幕'; animated.append(text); text.remove(); }
-    await wait(250); window.fixtureMenus['复制 Bili-Peek 排错信息']();
+    await wait(250); window.fixtureMenus['复制排错信息']();
     expect(window.fixtureDiagnostic.counters.reconciles === reconcilesBefore, '播放器内部弹幕节点频繁增删不触发全页重新布局'); animated.remove();
     // Synthetic dispatchEvent bypasses hit testing; check the real mouse path too.
     const densityRect = ui('density').getBoundingClientRect();
@@ -190,8 +190,21 @@ document.getElementById('run-tests').addEventListener('click', async () => {
     expect(history.some(([start, end]) => start <= 21 && end >= 21) && history.some(([start, end]) => start <= 61 && end >= 61) && !history.some(([start, end]) => start < 40 && end > 40), '累计观看记录保存在当前分 P，跳过区间保持空白');
     const segment = ui('watch-track').querySelector('.watch-segment'); segment.focus();
     expect(!ui('tooltip').hidden && ui('tooltip').textContent.includes('已观看'), '聚焦观看轨迹显示区间详情'); segment.blur();
+    const savedToken = GM_getValue('export-token', '');
+    window.fixtureExport = 'success';
+    await until(() => loaded(), 'CPod 启动后面板未恢复');
+    window.fixtureHelperOffline = true;
+    const stopBegan = performance.now();
+    await until(() => !panel(), 'CPod 关闭后面板未及时移除', 900);
+    expect(!panel() && !document.querySelector('.right-container-inner').style.marginTop, 'CPod 关闭会移除双图并恢复原页面布局');
+    log(`  关闭检测及布局恢复：${Math.round(performance.now() - stopBegan)}ms（模拟助手离线）`);
+    expect(GM_getValue('export-token', '') === savedToken, '助手离线不清除配对信息');
+    const position = media().currentTime;
+    window.fixtureHelperOffline = false;
+    await until(() => loaded(), 'CPod 重启后面板未恢复');
+    expect(GM_getValue('export-token', '') === savedToken && media().currentTime === position, 'CPod 重启自动恢复双图，无需再次配对且不改变播放位置');
     log(`\n全部 ${passed} 项页面验收通过（模拟弹幕、真实浏览器媒体元素；非 B 站实测）。`);
     document.body.dataset.testResult='passed';
   } catch(error) {log('\n✗ '+error.message);document.body.dataset.testResult='failed';}
-  finally {window.fixtureFailNext=false;window.fixtureExport=false;window.fixtureNoSubtitles=false;GM_setValue('export-token',previousToken);button.disabled=false;}
+  finally {window.fixtureFailNext=false;window.fixtureHelperOffline=false;window.fixtureExport=false;window.fixtureNoSubtitles=false;GM_setValue('export-token',previousToken);button.disabled=false;}
 });

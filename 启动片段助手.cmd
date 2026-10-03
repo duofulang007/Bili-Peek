@@ -5,8 +5,6 @@ set "BILI_PEEK_NODE=C:\Users\23221\.cache\codex-runtimes\codex-primary-runtime\d
 if errorlevel 1 goto failed
 "%BILI_PEEK_NODE%" helper\start.cjs
 if errorlevel 1 goto failed
-powershell -NoProfile -ExecutionPolicy Bypass -File helper\copy-pairing.ps1
-if errorlevel 1 goto failed
 pause
 exit /b 0
 :failed

@@ -2,7 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const { selectCues, srt, validateTask, exportClip, run, keyFor, readingParagraphs, note, mediaCheck } = require('../helper/export.cjs');
+const { selectCues, validateTask, exportClip, run, keyFor, readingParagraphs, note, mediaCheck } = require('../helper/export.cjs');
 const { signWbi } = require('../helper/server.cjs');
 const root = path.resolve(__dirname, '..');
 const task = { id: 'BV1xx411c7mD', part: 2, cid: 123, start: 2.4, end: 3.7, videoUrl: 'https://test.bilivideo.com/video.m4s', audioUrl: 'https://test.bilivideo.com/audio.m4s', title: '测试视频', tags: ['测试'], noteName: '自定义笔记', summary: '这是一段简介', subtitles: [{ from: 0, to: 2.4, content: '区间之前' }, { from: 2, to: 3, content: '起点跨句' }, { from: 3, to: 3.5, content: '完整一句' }, { from: 3.5, to: 4, content: '终点跨句' }, { from: 3.7, to: 5, content: '区间之后' }] };
@@ -12,8 +12,7 @@ test('subtitle boundaries exclude adjacent cues and rebase clipped sentences', (
   assert.deepEqual(cues.map(cue => cue.content), ['起点跨句', '完整一句', '终点跨句']);
   assert.equal(cues[0].from, 0); assert.ok(Math.abs(cues[2].to - 1.3) < 1e-9);
   assert.equal(cues[0].clipped, true); assert.equal(cues[1].clipped, false);
-  assert.match(srt(cues), /00:00:00,000 --> 00:00:00,600/);
-  assert.match(srt(cues), /00:00:01,100 --> 00:00:01,300/);
+  assert.ok(Math.abs(cues[1].from - 0.6) < 1e-9 && Math.abs(cues[1].to - 1.1) < 1e-9);
 });
 test('reading text joins fragments without rewriting and breaks at pauses or existing sentence ends', () => {
   const cues = [
@@ -29,7 +28,7 @@ test('reading text joins fragments without rewriting and breaks at pauses or exi
 });
 test('note shows coherent paragraphs with only their starting time and removes old transcript layouts', () => {
   const cues = selectCues(task.subtitles, task.start, task.end);
-  const markdown = note(task, cues, keyFor(task), 1.3, {});
+  const markdown = note(task, cues, keyFor(task));
   assert.match(markdown, /## 片段字幕/);
   assert.doesNotMatch(markdown, /^# /m);
   assert.match(markdown, /\*\*00:00\*\*\n\n起点跨句完整一句终点跨句/);
@@ -37,14 +36,14 @@ test('note shows coherent paragraphs with only their starting time and removes o
   assert.match(markdown, /选区边界处保留字幕整句/);
   assert.equal(readingParagraphs([{ from: 1, to: 3, content: '原文。' }, { from: 14, to: 16, content: '下一段' }, { from: 16, to: 18, content: '原文' }], true), '**00:01**\n\n原文。\n\n**00:14**\n\n下一段原文');
   assert.equal(readingParagraphs([{ from: 3601, to: 3603, content: '长片段' }], true), '**01:00:01**\n\n长片段');
-  assert.doesNotMatch(note({ ...task, summary: '' }, cues, keyFor(task), 1.3, {}), /\nsummary:/);
+  assert.doesNotMatch(note({ ...task, summary: '' }, cues, keyFor(task)), /\nsummary:/);
 });
 test('only Bilibili media, valid ranges and nonempty subtitles are accepted', () => {
   assert.equal(validateTask(task), task);
   for (const patch of [{ start: -1 }, { end: task.start }, { videoUrl: 'http://127.0.0.1/private' }, { audioUrl: 'https://bilivideo.com.attacker.example/a' }, { subtitles: [] }, { part: 0 }, { tags: [] }, { tags: ['123'] }, { tags: ['无效 标签'] }, { tags: ['///'] }]) assert.throws(() => validateTask({ ...task, ...patch }));
   assert.notEqual(keyFor(task), keyFor({ ...task, part: 1 }));
   assert.doesNotThrow(() => validateTask({ ...task, subtitles: [], videoOnly: true }));
-  const videoOnlyNote = note({ ...task, subtitles: [], videoOnly: true }, [], keyFor(task), 1.3, {});
+  const videoOnlyNote = note({ ...task, subtitles: [], videoOnly: true }, [], keyFor(task));
   assert.match(videoOnlyNote, /未保存字幕/); assert.doesNotMatch(videoOnlyNote, /带时间原文|\.srt/);
 });
 test('WBI signing only includes supported parameters and strips reserved symbols', () => {

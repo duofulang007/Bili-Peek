@@ -6,7 +6,7 @@ const { spawn } = require('node:child_process');
 function run(executable, args, timeout = 600000, onProgress) {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, { windowsHide: true, shell: false });
-    let output = '', error = '', progressBuffer = '';
+    let output = '', progressBuffer = '';
     const timer = setTimeout(() => { child.kill(); reject(new Error('处理超时')); }, timeout);
     child.stdout.on('data', data => {
       output = (output + data).slice(-1000000);
@@ -18,7 +18,8 @@ function run(executable, args, timeout = 600000, onProgress) {
         if (match) onProgress(Number(match[1]) / 1000000);
       }
     });
-    child.stderr.on('data', data => { error = (error + data).slice(-16000); });
+    // Drain stderr so a chatty failure cannot block the tool on a full pipe.
+    child.stderr.resume();
     child.on('error', err => { clearTimeout(timer); reject(new Error(`无法启动处理工具：${err.code}`)); });
     child.on('close', code => { clearTimeout(timer); code === 0 ? resolve(output) : reject(new Error(`媒体处理失败（${code}）。请检查媒体地址是否过期和工具配置。`)); });
   });
@@ -40,14 +41,12 @@ function validateTask(input) {
 function selectCues(cues, start, end) {
   return cues.filter(cue => Number.isFinite(cue.from) && Number.isFinite(cue.to) && cue.to > cue.from && typeof cue.content === 'string' && cue.to > start && cue.from < end)
     .sort((a, b) => a.from - b.from)
-    .map(cue => ({ from: Math.max(cue.from, start) - start, to: Math.min(cue.to, end) - start, content: cue.content.slice(0, 10000), clipped: cue.from < start || cue.to > end, originalFrom: cue.from, originalTo: cue.to }));
+    .map(cue => ({ from: Math.max(cue.from, start) - start, to: Math.min(cue.to, end) - start, content: cue.content.slice(0, 10000), clipped: cue.from < start || cue.to > end }));
 }
-function stamp(seconds, srt = false) {
-  const milliseconds = Math.round(seconds * 1000), whole = Math.floor(milliseconds / 1000);
-  const time = [Math.floor(whole / 3600), Math.floor(whole / 60) % 60, whole % 60].map(value => String(value).padStart(2, '0')).join(':');
-  return srt ? `${time},${String(milliseconds % 1000).padStart(3, '0')}` : time;
+function stamp(seconds) {
+  const whole = Math.floor(Math.round(seconds * 1000) / 1000);
+  return [Math.floor(whole / 3600), Math.floor(whole / 60) % 60, whole % 60].map(value => String(value).padStart(2, '0')).join(':');
 }
-function srt(cues) { return cues.map((cue, index) => `${index + 1}\n${stamp(cue.from, true)} --> ${stamp(cue.to, true)}\n${cue.content}\n`).join('\n'); }
 function keyFor(task) { return crypto.createHash('sha256').update(JSON.stringify([task.id, task.part, task.cid, task.start, task.end])).digest('hex').slice(0, 20); }
 
 function mediaCheck(probe, duration, sourceEnd, start = 0) {
@@ -85,7 +84,7 @@ function readingParagraphs(cues, withTimes = false) {
   }).join('\n\n');
 }
 
-function note(task, cues, key, measured, config) {
+function note(task, cues, key) {
   const tags = [...new Set(task.tags || [])];
   if (!cues.length) return `---\ntags: ${JSON.stringify(tags)}\ncreated: ${JSON.stringify(new Date().toISOString().slice(0, 10))}\nsource: ${JSON.stringify(`https://www.bilibili.com/video/${task.id}/?p=${task.part}&t=${task.start}`)}${task.summary?.trim() ? '\nsummary: ' + JSON.stringify(task.summary.trim()) : ''}\n---\n\n![[Bili-Peek附件/${key}.mp4]]\n\n> [!info] 未保存字幕\n> 此片段未取得可用字幕，仅保存视频。未生成转录文字。\n\n原视频区间：${stamp(task.start)}–${stamp(task.end)} · 第 ${task.part} P\n`;
   return `---\ntags: ${JSON.stringify(tags)}\ncreated: ${JSON.stringify(new Date().toISOString().slice(0, 10))}\nsource: ${JSON.stringify(`https://www.bilibili.com/video/${task.id}/?p=${task.part}&t=${task.start}`)}${task.summary?.trim() ? '\nsummary: ' + JSON.stringify(task.summary.trim()) : ''}\n---\n\n![[Bili-Peek附件/${key}.mp4]]\n\n## 片段字幕\n\n时间以片段起点为 00:00。${cues.some(cue => cue.clipped) ? '选区边界处保留字幕整句。' : ''}\n\n${readingParagraphs(cues, true)}\n`;
@@ -157,9 +156,8 @@ async function exportClip(task, config, runner = run, onProgress = () => {}) {
     stage('verify');
     await runner(config.ffmpeg, ['-v', 'error', '-xerror', '-nostdin', '-progress', 'pipe:1', '-stats_period', '1', '-i', tempVideo, '-f', 'null', '-'], 300000, progress);
     stage('write');
-    const settings = { ...config, category: typeof task.category === 'string' ? task.category.slice(0, 100) : config.category, tags: Array.isArray(task.tags) ? task.tags.filter(tag => typeof tag === 'string').map(tag => tag.slice(0, 100)).slice(0, 20) : config.tags };
     const ending = check.atEnd ? `\n> 视频到达源文件末尾，实际保存时长 ${measured.toFixed(2)} 秒；页面标示时长与源文件略有差异。\n` : '';
-    await fs.writeFile(path.join(temp, 'note.md'), note(task, cues, key, measured, settings) + ending, 'utf8');
+    await fs.writeFile(path.join(temp, 'note.md'), note(task, cues, key) + ending, 'utf8');
     // Exclusive commits never overwrite existing notes or attachments.
     const files = [['clip.mp4', videoPath], ['note.md', notePath]];
     for (const [source, target] of files) {
@@ -173,10 +171,10 @@ async function exportClip(task, config, runner = run, onProgress = () => {}) {
     return { ...result, duration: measured, timings };
   } catch (error) {
     try {
-      for (const filename of ['clip.mp4', 'clip.srt', 'note.md']) await fs.unlink(path.join(temp, filename)).catch(err => { if (err.code !== 'ENOENT') throw err; });
+      for (const filename of ['clip.mp4', 'note.md']) await fs.unlink(path.join(temp, filename)).catch(err => { if (err.code !== 'ENOENT') throw err; });
       await fs.rmdir(temp);
     } catch { error.message += '；部分暂存文件未能清理'; }
     throw error;
   }
 }
-module.exports = { run, selectCues, stamp, srt, validateTask, keyFor, note, exportClip, readingParagraphs, mediaCheck };
+module.exports = { run, selectCues, stamp, validateTask, keyFor, note, exportClip, readingParagraphs, mediaCheck };

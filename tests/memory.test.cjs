@@ -87,6 +87,7 @@ test('pagehide releases data, media listeners and scheduling; pageshow can sched
   Object.assign(state, {
     observer: observer(), themeObserver: observer(), playerModeObserver: observer(), sizeObserver: observer(),
     observedPlayer: {}, cancelSeek() {}, clearTimeout() {}, scheduled: 123,
+    helperTimer: 456, pageSuspended: false, syncHelper() {},
     media: {}, bindMedia(next) { state.media = next; },
     records: [{ text: 'previous' }], chartData: { bins: [] },
     ui: { cloud: { replaceChildren() {} }, density: { replaceChildren() {} } },
@@ -104,9 +105,11 @@ test('pagehide releases data, media listeners and scheduling; pageshow can sched
   assert.equal(state.chartData, null);
   assert.equal(state.media, null);
   assert.equal(state.scheduled, null);
+  assert.equal(state.pageSuspended, true);
   let observed = false, scheduled = false;
   state.observePage = () => { observed = true; };
   state.schedule = () => { assert.equal(state.scheduled, null); scheduled = true; };
   state.pageshow({ persisted: true });
   assert.equal(observed && scheduled, true);
+  assert.equal(state.pageSuspended, false);
 });

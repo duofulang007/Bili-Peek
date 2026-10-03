@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         Bili-Peek · 弹幕观看助手
 // @namespace    bili-peek
-// @version      0.3.22
+// @version      0.3.28
 // @description  视频右侧双图：弹幕词云与可点击跳转的密度图，推荐视频保留在下方。
 // @match        https://www.bilibili.com/video/*
+// @match        https://www.bilibili.com/
 // @run-at       document-idle
 // @noframes
 // @grant        GM_xmlhttpRequest
@@ -307,6 +308,20 @@
     return matching.find(item => item.codecs?.startsWith('avc')) || matching[0];
   }
 
+  function selectMediaUrl(stream) {
+    const candidates = [stream?.baseUrl, stream?.base_url,
+      ...(Array.isArray(stream?.backupUrl) ? stream.backupUrl : []),
+      ...(Array.isArray(stream?.backup_url) ? stream.backup_url : [])];
+    for (const candidate of candidates) {
+      if (typeof candidate !== 'string') continue;
+      try {
+        const url = new URL(candidate);
+        if (url.protocol === 'https:' && !url.username && !url.password && /(^|\.)bilivideo\.(com|cn)$/.test(url.hostname) && (!url.port || url.port === '443')) return candidate;
+      } catch {}
+    }
+    return null;
+  }
+
   function currentQuality() {
     const label = document.querySelector('.bpx-player-ctrl-quality-result, .bilibili-player-video-quality-menu .bilibili-player-video-quality-menu-text');
     const selected = qualityFromLabel(label?.textContent);
@@ -320,7 +335,7 @@
   }
 
   if (typeof document === 'undefined') {
-    if (typeof module !== 'undefined') module.exports = { formatTime, routeKey, seekMedia, decodeDanmaku, density, wordStats, parsePageState, mergeWatchRanges, watchedAdvance, qualityFromLabel, selectQualityStream };
+    if (typeof module !== 'undefined') module.exports = { formatTime, routeKey, seekMedia, decodeDanmaku, density, wordStats, parsePageState, mergeWatchRanges, watchedAdvance, qualityFromLabel, selectQualityStream, selectMediaUrl };
     return;
   }
   if (window.top !== window.self || document.getElementById(HOST_ID)) return;
@@ -333,6 +348,14 @@
   let seekNoticeTimer, openNoteTimer;
   const exportDrafts = new Map();
   let clipRange = null, rangeDrag = null, exportingRoute = null;
+  let helperOnline = false, helperFailures = 0, helperTimer, helperSync = 0, pageSuspended = false;
+  const savedValue = (key, fallback) => typeof GM_getValue === 'function' ? GM_getValue(key, fallback) : fallback;
+  const managed = () => Boolean(savedValue('export-token', ''));
+  let helperManaged = managed();
+  const helperPort = () => {
+    const port = Number(savedValue('export-port', 18766));
+    return Number.isInteger(port) && port > 0 && port <= 65535 ? port : 18766;
+  };
   const diagnostic = { started: Date.now(), reconciles: 0, charts: 0, mediaEvents: 0, clicks: 0, moves: 0, seeks: 0, lastSeek: null, lastError: '' };
   const cache = new Map();
   let alignedRail = null, originalRailMargin = '';
@@ -401,10 +424,15 @@
     if (text !== undefined) node.textContent = text;
     return node;
   }
+  // Pointer x -> video time, matching the 32..308 plot area drawn by drawDensity.
+  function densityTime(clientX) {
+    const rect = ui.density.getBoundingClientRect();
+    return Math.max(0, Math.min(videoDuration, ((clientX - rect.left) / rect.width * 320 - 32) / 276 * videoDuration));
+  }
   function createPanel() {
     host = document.createElement('div');
     host.id = HOST_ID;
-    host.dataset.version = '0.3.19';
+    host.dataset.version = '0.3.28';
     // Bilibili / other scripts can disable hit testing on the whole right rail.
     // Override inheritance only on our panel, never re-enable native controls.
     host.style.setProperty('pointer-events', 'auto', 'important');
@@ -430,18 +458,14 @@
       });
     }
     ui.clear.addEventListener('click', () => { selectedTerm = ''; renderCharts(); });
-    const timeAt = event => {
-      const rect = ui.density.getBoundingClientRect();
-      return Math.max(0, Math.min(videoDuration, ((event.clientX - rect.left) / rect.width * 320 - 32) / 276 * videoDuration));
-    };
-    ui.density.addEventListener('pointermove', event => showTooltip(timeAt(event)));
+    ui.density.addEventListener('pointermove', event => showTooltip(densityTime(event.clientX)));
     ui.density.addEventListener('pointerleave', () => { ui.tooltip.hidden = true; ui.density.querySelector('.hover')?.setAttribute('visibility', 'hidden'); });
     ui.density.addEventListener('click', event => {
       if (!chartData) return;
       const rect = ui.density.getBoundingClientRect();
       const y = (event.clientY - rect.top) / rect.height * chartData.height;
       if (y < 18 || y > chartData.bottom) return;
-      jump(timeAt(event));
+      jump(densityTime(event.clientX));
     });
     ui.density.addEventListener('keydown', event => {
       if (!chartData) return;
@@ -566,18 +590,10 @@
         if (rangeDrag?.pointer !== event.pointerId || rangeDrag.id !== id) return;
         const drag = rangeDrag; rangeDrag = null;
         if (node.hasPointerCapture(event.pointerId)) node.releasePointerCapture(event.pointerId);
-        if (event.type === 'pointerup' && id === 'range-window' && !drag.moved && drag.route === currentRoute && chartData) {
-          const rect = ui.density.getBoundingClientRect();
-          jump(Math.max(0, Math.min(videoDuration, ((event.clientX - rect.left) / rect.width * 320 - 32) / 276 * videoDuration)));
-        }
+        if (event.type === 'pointerup' && id === 'range-window' && !drag.moved && drag.route === currentRoute && chartData) jump(densityTime(event.clientX));
       };
       for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) node.addEventListener(type, finish);
-      node.addEventListener('pointermove', event => {
-        if (!rangeDrag) {
-          const rect = ui.density.getBoundingClientRect();
-          showTooltip(Math.max(0, Math.min(videoDuration, ((event.clientX - rect.left) / rect.width * 320 - 32) / 276 * videoDuration)));
-        }
-      });
+      node.addEventListener('pointermove', event => { if (!rangeDrag) showTooltip(densityTime(event.clientX)); });
       node.addEventListener('pointerleave', () => { ui.tooltip.hidden = true; ui.density.querySelector('.hover')?.setAttribute('visibility', 'hidden'); });
       node.addEventListener('keydown', event => {
         if (!chartData || !clipRange) return;
@@ -604,7 +620,7 @@
           exportingRoute = taskRoute; updateClipUI();
           const report = (message, error = false) => { if (currentRoute === taskRoute) status(message, error); };
           report('正在连接本地助手…');
-          await helperRequest('/health', token);
+          await helperRequest('/health', token, undefined, 2000);
           report('正在读取当前分 P 的视频和字幕…');
           const payload = await prepareExport(taskRoute, range, token);
           Object.assign(payload, metadata);
@@ -687,14 +703,55 @@
     });
   }
 
-  function helperRequest(endpoint, token, payload) {
+  function helperRequest(endpoint, token, payload, timeout = 15000, port = helperPort(), ticket) {
     return new Promise((resolve, reject) => {
-      GM_xmlhttpRequest({ method: payload ? 'POST' : 'GET', url: `http://127.0.0.1:18766${endpoint}`, headers: { 'X-Bili-Peek-Token': token, ...(payload ? { 'Content-Type': 'application/json' } : {}) }, ...(payload ? { data: JSON.stringify(payload) } : {}), timeout: 15000,
+      GM_xmlhttpRequest({ method: payload ? 'POST' : 'GET', url: `http://127.0.0.1:${port}${endpoint}`, headers: { 'X-Bili-Peek-Token': token, 'X-Bili-Peek-Client': 'userscript', ...(ticket ? { 'X-Bili-Peek-Ticket': ticket } : {}), ...(payload ? { 'Content-Type': 'application/json' } : {}) }, ...(payload ? { data: JSON.stringify(payload) } : {}), timeout,
         onload: response => {
           try { const result = JSON.parse(response.responseText); if (response.status >= 400) throw new Error(result.error || '助手请求失败'); resolve(result); }
           catch (error) { reject(error); }
-        }, onerror: () => reject(new Error('无法连接本地助手，请先启动“启动片段助手.cmd”')), ontimeout: () => reject(new Error('本地助手响应超时')) });
+        }, onerror: () => reject(new Error('助手未启动，请在 CPod 点击运行；已保存的配对信息无需重新输入')), ontimeout: () => reject(new Error('本地助手响应超时，请检查 CPod 运行状态')) });
     });
+  }
+
+  async function syncHelper() {
+    const sequence = ++helperSync;
+    clearTimeout(helperTimer);
+    if (pageSuspended) return;
+    const token = savedValue('export-token', '');
+    const previous = helperOnline;
+    let online = false, failed = false;
+    if (managed() && token) {
+      try { online = Boolean((await helperRequest('/health', token, undefined, 250)).ready); }
+      catch { failed = true; }
+    }
+    if (pageSuspended || sequence !== helperSync) return;
+    if (failed) { if (++helperFailures >= 2) helperOnline = false; }
+    else { helperOnline = online; helperFailures = 0; }
+    if (previous !== helperOnline || helperManaged !== managed()) schedule(0);
+    helperManaged = managed();
+    helperTimer = setTimeout(syncHelper, failed && helperOnline ? 50 : 250);
+  }
+
+  async function connectFromCPod() {
+    const params = new URLSearchParams(location.hash.slice(1));
+    const ticket = params.get('bili-peek-connect'), port = Number(params.get('port'));
+    if (!ticket) return;
+    // Remove the short-lived ticket before making any request or displaying it.
+    history.replaceState(history.state, '', location.pathname + location.search);
+    if (!/^[a-f0-9]{64}$/.test(ticket) || !Number.isInteger(port) || port < 1 || port > 65535) return;
+    try {
+      const result = await helperRequest('/pair', '', {}, 2000, port, ticket);
+      if (!/^[a-f0-9]{64}$/.test(result.token) || result.port !== port) throw new Error('助手连接响应无效');
+      GM_setValue('export-token', result.token); GM_setValue('export-port', port);
+      helperOnline = true; schedule();
+      connectionNotice('Bili-Peek 已连接 CPod，无需重复配对。');
+    } catch (error) { connectionNotice(`Bili-Peek 连接失败：${error.message}`); }
+  }
+
+  function connectionNotice(message) {
+    const notice = document.createElement('div'); notice.setAttribute('role', 'status'); notice.textContent = message;
+    notice.style.cssText = 'position:fixed;top:80px;right:24px;z-index:2147483647;padding:12px 18px;background:#18191c;color:#fff;border-radius:6px;font:14px/1.5 sans-serif;max-width:360px';
+    document.body.append(notice); setTimeout(() => notice.remove(), 8000);
   }
 
   async function prepareExport(key, range, token) {
@@ -706,18 +763,15 @@
     const page = info.data?.pages?.find(item => item.page === part);
     if (info.code !== 0 || !page?.cid || range.end > page.duration) throw new Error('无法确认视频或选区超出当前分 P');
     const query = `${identity}&cid=${page.cid}`;
-    let text = { body: [] }, subtitleSource = '', subtitleIssue = '';
-    let player;
-    try { player = await request(`https://api.bilibili.com/x/player/wbi/v2?${query}`, false, controller.signal); }
-    catch { subtitleIssue = '字幕接口读取失败'; }
+    let text = { body: [] };
+    const player = await request(`https://api.bilibili.com/x/player/wbi/v2?${query}`, false, controller.signal).catch(() => null);
     const subtitles = player?.data?.subtitle?.subtitles || [];
     const chosen = subtitles.find(item => item.lan === 'zh-CN' || item.lan === 'zh-Hans') || subtitles.find(item => /^ai-zh|^zh/.test(item.lan)) || subtitles[0];
-    if (player?.code !== 0 || !chosen?.subtitle_url) subtitleIssue ||= '当前分 P 未取得可用字幕，可能需要登录';
-    else {
+    // Missing subtitles only degrade the export to video-only; the saved note states that.
+    if (player?.code === 0 && chosen?.subtitle_url) {
       const subtitleUrl = new URL(chosen.subtitle_url, 'https://www.bilibili.com');
       if (subtitleUrl.protocol !== 'https:' || !['aisubtitle.hdslb.com', 'subtitle.bilibili.com'].includes(subtitleUrl.hostname)) throw new Error('字幕地址暂不支持，请反馈地址域名');
-      try { text = await request(subtitleUrl.href, false, controller.signal); subtitleSource = chosen.lan_doc || chosen.lan; }
-      catch { subtitleIssue = '字幕文件读取失败'; }
+      text = await request(subtitleUrl.href, false, controller.signal).catch(() => text);
     }
     const cues = Array.isArray(text.body) ? text.body.filter(cue => Number.isFinite(cue.from) && Number.isFinite(cue.to) && cue.to > cue.from && cue.to > range.start && cue.from < range.end && typeof cue.content === 'string' && cue.content.trim()) : [];
     if (!cues.length) {
@@ -733,15 +787,18 @@
     const video = selectQualityStream(dash?.video, quality);
     const audio = dash?.audio?.slice().sort((a, b) => b.bandwidth - a.bandwidth)[0];
     if (streams.code !== 0 || !video || !audio) throw new Error('未取得当前所选画质的音视频轨道，请确认登录与画质权限后重试');
-    return { id, part, cid: page.cid, start: range.start, end: range.end, title: info.data.title, videoUrl: video.baseUrl || video.base_url, audioUrl: audio.baseUrl || audio.base_url, subtitles: text.body, subtitleSource, videoOnly: !cues.length };
+    const videoUrl = selectMediaUrl(video), audioUrl = selectMediaUrl(audio);
+    if (!videoUrl || !audioUrl) throw new Error(`未取得可用的${!videoUrl ? '视频' : '音频'}下载地址，请重试；仍失败时请复制排错信息`);
+    return { id, part, cid: page.cid, start: range.start, end: range.end, title: info.data.title, videoUrl, audioUrl, subtitles: text.body, videoOnly: !cues.length };
   }
 
   if (typeof GM_registerMenuCommand === 'function' && typeof GM_setValue === 'function') {
-    GM_registerMenuCommand('配对 Obsidian 片段助手', () => {
-      const token = prompt('启动本地助手后，配对码会复制到剪贴板。请粘贴配对码：');
+    GM_registerMenuCommand('连接片段助手', () => {
+      const token = prompt('首次手动连接时粘贴配对码。配对码会长期保存，助手关闭或重启无需重新配对：');
       if (token === null) return;
       if (!/^[a-f0-9]{64}$/.test(token.trim())) { status('配对码格式不正确。', true); return; }
-      GM_setValue('export-token', token.trim()); status('配对码已保存，下一次保存将连接本地助手。');
+      GM_setValue('export-token', token.trim());
+      status('配对码已保存，正在连接 CPod。'); syncHelper();
     });
   }
 
@@ -1171,13 +1228,15 @@
   function reconcile() {
     diagnostic.reconciles++;
     scheduled = null;
-    const key = routeKey(location.href);
+    const key = !managed() || helperOnline ? routeKey(location.href) : null;
     if (!key) {
+      cancelSeek();
       dataRequest?.abort(); dataRoute = null;
       cache.clear(); records = []; chartData = null;
       if (ui) { ui.cloud.replaceChildren(); ui.density.replaceChildren(); }
       restoreRail();
       bindMedia(null);
+      observePlayerMode();
       host?.remove();
       currentRoute = null;
       return;
@@ -1226,6 +1285,7 @@
 
   const important = `${RIGHT}, ${RECOMMEND}, ${PLAYER}, ${MEDIA}, ${UP}, .video-page-card-small`;
   const observer = new MutationObserver(records => {
+    if (managed() && !helperOnline) return;
     if (routeKey(location.href) !== currentRoute) { schedule(); return; }
     for (const record of records) {
       if (record.type === 'attributes') { schedule(); return; }
@@ -1269,9 +1329,11 @@
   window.addEventListener('hashchange', schedule);
   window.addEventListener('resize', schedule, { passive: true });
   document.addEventListener('fullscreenchange', layoutVisibility);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && !pageSuspended) syncHelper(); });
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', theme);
   window.addEventListener('pagehide', () => {
     observer.disconnect();
+    pageSuspended = true; clearTimeout(helperTimer);
     themeObserver.disconnect();
     playerModeObserver.disconnect();
     sizeObserver.disconnect();
@@ -1286,7 +1348,7 @@
     scheduled = null;
   });
   window.addEventListener('pageshow', event => {
-    if (event.persisted) { observePage(); schedule(); }
+    if (event.persisted) { pageSuspended = false; observePage(); syncHelper(); schedule(); }
   });
   function diagnosticReport() {
     const describe = element => {
@@ -1320,7 +1382,7 @@
     return { version: host?.dataset.version, route: routeKey(location.href), elapsedSeconds: Math.round((Date.now() - diagnostic.started) / 1000),
       counters: { ...diagnostic }, states: { currentRoute, dataRoute, loadedRoute, restoreAfterRoute, ready: Boolean(ready()),
         mediaBound: Boolean(media), chartReady: Boolean(chartData), records: records.length, videoDuration, phraseMode, seeking,
-        panelConnected: Boolean(host?.isConnected), panelHidden: host?.hidden, densityDisabled: ui?.density.getAttribute('aria-disabled'),
+        panelConnected: Boolean(host?.isConnected), panelHidden: host?.hidden, managedByCPod: managed(), helperOnline, helperPort: helperPort(), densityDisabled: ui?.density.getAttribute('aria-disabled'),
         status: ui?.status.textContent, railMargin: alignedRail?.style.marginTop, originalRailMargin },
       candidates, ancestors, hit,
       page: { loadingState: document.readyState, serverRendered: document.getElementById('app')?.getAttribute('data-server-rendered') ?? null,
@@ -1330,11 +1392,12 @@
         viewport: { width: innerWidth, height: innerHeight } } };
   }
   if (typeof GM_registerMenuCommand === 'function' && typeof GM_setClipboard === 'function') {
-    GM_registerMenuCommand('复制 Bili-Peek 排错信息', () => {
+    GM_registerMenuCommand('复制排错信息', () => {
       try { GM_setClipboard(JSON.stringify(diagnosticReport(), null, 2), 'text'); status('排错信息已复制，请粘贴到聊天中。'); }
       catch (error) { status(`无法复制排错信息：${error.message}`, true); }
     });
   }
   observePage();
   reconcile();
+  connectFromCPod().finally(syncHelper);
 })();

@@ -11,8 +11,13 @@ try {
     if ($Action -eq 'run') {
         $clipNode = (Get-Command node.exe -ErrorAction SilentlyContinue).Source
         if (!$clipNode) { $clipNode = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe' }
-        & $clipNode (Join-Path $clipRoot 'helper\start.cjs')
-        if ($LASTEXITCODE -ne 0) { throw '片段助手启动失败，请检查配置与 .local/helper.log。' }
+        # Shell launch keeps the background helper from inheriting CPod's redirected output pipes.
+        $clipStartProcess = Start-Process -FilePath $clipNode -ArgumentList ('"' + (Join-Path $clipRoot 'helper\start.cjs') + '"') -WorkingDirectory $clipRoot -WindowStyle Hidden -PassThru
+        $clipStartProcess.WaitForExit()
+        if ($clipStartProcess.ExitCode -ne 0) { throw '片段助手启动失败，请检查配置与 .local/helper.log。' }
+        if (Test-Path -LiteralPath (Join-Path $clipRoot '.local/runtime.json')) {
+            & (Join-Path $clipRoot 'helper\start-runtime.ps1')
+        }
     }
     $clipProcess = $null
     if (Test-Path -LiteralPath $clipPidPath) {

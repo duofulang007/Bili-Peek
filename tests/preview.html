@@ -46,6 +46,7 @@ window.GM_setClipboard = text => { window.fixtureDiagnostic = JSON.parse(text); 
 window.GM_xmlhttpRequest=options=>{
   if (options.url.startsWith('http://127.0.0.1:18766') && window.fixtureExport) {
     const endpoint = new URL(options.url).pathname;
+    if (window.fixtureHelperOffline) { setTimeout(() => options.onerror(), 60); return { abort() {} }; }
     let result = {};
     if (endpoint === '/health') result = { ready: true };
     if (endpoint === '/sign-wbi') { window.fixtureQuality = JSON.parse(options.data).params.qn; result = { query: 'bvid=BVLocalPreview&cid=1001&qn=' + window.fixtureQuality }; }

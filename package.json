@@ -1,11 +1,11 @@
 {
   "name": "bili-peek",
-  "version": "0.3.22",
+  "version": "0.3.28",
   "private": true,
   "description": "Edge / Tampermonkey Bilibili viewing companion",
   "scripts": {
-    "check": "node --check Bili-Peek.user.js && node --check tests/preview-server.cjs && node --check helper/export.cjs && node --check helper/server.cjs",
-    "test": "node --test tests/core.test.cjs tests/data.test.cjs tests/export.test.cjs tests/watch.test.cjs tests/quality.test.cjs tests/obsidian-player.test.cjs tests/memory.test.cjs",
+    "check": "node --check Bili-Peek.user.js && node --check Bili-Peek-loader.user.js && node --check helper/runtime.cjs && node --check tests/preview-server.cjs && node --check helper/export.cjs && node --check helper/server.cjs",
+    "test": "node --test tests/core.test.cjs tests/data.test.cjs tests/export.test.cjs tests/watch.test.cjs tests/quality.test.cjs tests/obsidian-player.test.cjs tests/memory.test.cjs tests/helper-control.test.cjs tests/runtime.test.cjs",
     "preview": "node tests/preview-server.cjs"
   }
 }

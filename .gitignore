@@ -3,3 +3,7 @@ tests/artifacts/
 .local/
 .tools/
 tests/export-sandbox/
+
+# WorkBuddy 工具元数据（本地笔记与备份，不是项目内容）
+.workbuddy/
+.workbuddy-ai/

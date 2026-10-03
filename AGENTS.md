@@ -7,6 +7,7 @@ Bili-Peek 是用于 Edge / Tampermonkey 的 B 站观看助手：用户脚本 `Bi
 - 先看 `git status`，保留已有改动；按当前代码、`package.json` 脚本与测试判断行为，不照抄旧记忆里的命令集合。
 - 三个入口各自独立：用户脚本（浏览器侧）、助手（Node 侧）、`.apex/module.json`（ControlPod 侧）。改一处要确认另一处是否受影响。
 - `.local/`、`.tools/`、`node_modules/`、`tests/artifacts/`、`tests/export-sandbox/`、`.workbuddy/` 由 `.gitignore` 排除，不进提交。
+- `docs/` 与 `初稿方案.md` 是历史设计与概念演示，不代表已实现功能；不要照它改代码。
 
 ## 必须保持
 

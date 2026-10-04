@@ -2,12 +2,22 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
+const { cleanError } = require('./segment-download.cjs');
 
 function run(executable, args, timeout = 600000, onProgress) {
   return new Promise((resolve, reject) => {
+    const options = typeof timeout === 'object' ? timeout : {};
+    if (options.signal?.aborted) return reject(options.signal.reason);
     const child = spawn(executable, args, { windowsHide: true, shell: false });
-    let output = '', progressBuffer = '';
-    const timer = setTimeout(() => { child.kill(); reject(new Error('处理超时')); }, timeout);
+    let output = '', progressBuffer = '', errors = '', failure, lastActivity = performance.now(), lastTime = -1, lastCounter = options.activity?.();
+    const stop = error => { failure = error; child.kill(); };
+    const abort = () => stop(options.signal.reason || new Error('任务已取消'));
+    options.signal?.addEventListener('abort', abort, { once: true });
+    const timer = options.idleMs ? setInterval(() => {
+      const counter = options.activity?.();
+      if (counter !== lastCounter) { lastCounter = counter; lastActivity = performance.now(); }
+      if (performance.now() - lastActivity > options.idleMs) stop(new Error(`连续 ${Math.round(options.idleMs / 1000)} 秒没有处理进展，请检查网络或重试`));
+    }, 1000) : setTimeout(() => stop(new Error('处理超时')), typeof timeout === 'number' ? timeout : 600000);
     child.stdout.on('data', data => {
       output = (output + data).slice(-1000000);
       if (!onProgress) return;
@@ -15,19 +25,26 @@ function run(executable, args, timeout = 600000, onProgress) {
       const lines = progressBuffer.split('\n'); progressBuffer = lines.pop();
       for (const line of lines) {
         const match = /^out_time_us=(\d+)/.exec(line);
-        if (match) onProgress(Number(match[1]) / 1000000);
+        if (match) {
+          const seconds = Number(match[1]) / 1000000;
+          if (seconds > lastTime) { lastTime = seconds; lastActivity = performance.now(); }
+          onProgress(seconds);
+        }
       }
     });
     // Drain stderr so a chatty failure cannot block the tool on a full pipe.
-    child.stderr.resume();
-    child.on('error', err => { clearTimeout(timer); reject(new Error(`无法启动处理工具：${err.code}`)); });
-    child.on('close', code => { clearTimeout(timer); code === 0 ? resolve(output) : reject(new Error(`媒体处理失败（${code}）。请检查媒体地址是否过期和工具配置。`)); });
+    child.stderr.on('data', data => { errors = (errors + data).slice(-4000); });
+    const cleanup = () => { clearTimeout(timer); clearInterval(timer); options.signal?.removeEventListener('abort', abort); };
+    child.on('error', err => { cleanup(); reject(new Error(`无法启动处理工具：${err.code}`)); });
+    child.on('close', code => { cleanup(); failure ? reject(failure) : code === 0 ? resolve(output) : reject(new Error(`媒体处理失败（${code}）：${cleanError(new Error(errors.trim() || '请检查媒体地址是否过期和工具配置'))}`)); });
   });
 }
 
 function validateTask(input) {
   if (!/^(BV[0-9A-Za-z]{10}|av\d+)$/.test(input.id || '') || !Number.isSafeInteger(input.part) || input.part < 1 || !Number.isSafeInteger(input.cid) || input.cid <= 0) throw new Error('视频或分 P 标识无效');
   if (!Number.isFinite(input.start) || !Number.isFinite(input.end) || input.start < 0 || input.end <= input.start || input.end > 43200 || input.end - input.start > 1800) throw new Error('截取范围无效，单次最多 30 分钟');
+  if (input.cutMode !== undefined && (input.cutMode !== 'keyframe' || input.downloadEngine !== 'nre')) throw new Error('快速截取仅支持分片下载');
+  if (input.downloadQuality !== undefined && (!Number.isInteger(input.downloadQuality) || input.downloadQuality <= 0 || input.downloadQuality > 1000)) throw new Error('下载画质无效');
   for (const name of ['videoUrl', 'audioUrl']) {
     const url = new URL(input[name]);
     if (url.protocol !== 'https:' || url.username || url.password || !/(^|\.)bilivideo\.(com|cn)$/.test(url.hostname) || (url.port && url.port !== '443')) throw new Error('媒体地址无效');
@@ -47,18 +64,24 @@ function stamp(seconds) {
   const whole = Math.floor(Math.round(seconds * 1000) / 1000);
   return [Math.floor(whole / 3600), Math.floor(whole / 60) % 60, whole % 60].map(value => String(value).padStart(2, '0')).join(':');
 }
-function keyFor(task) { return crypto.createHash('sha256').update(JSON.stringify([task.id, task.part, task.cid, task.start, task.end])).digest('hex').slice(0, 20); }
+function keyFor(task) { const identity = [task.id, task.part, task.cid, task.start, task.end]; if (task.cutMode) identity.push(task.cutMode); if (task.downloadQuality !== undefined) identity.push(['quality', task.downloadQuality]); return crypto.createHash('sha256').update(JSON.stringify(identity)).digest('hex').slice(0, 20); }
 
 function mediaCheck(probe, duration, sourceEnd, start = 0) {
   const streams = probe.streams || [], measured = Number(probe.format?.duration);
   const video = streams.find(stream => stream.codec_type === 'video');
   const audio = streams.find(stream => stream.codec_type === 'audio');
-  const [numerator, denominator] = String(video?.avg_frame_rate || '0/1').split('/').map(Number);
-  const frame = denominator / numerator, tolerance = Math.max(.15, Number.isFinite(frame) ? frame * 2 : .15);
+  const tolerance = 1;
   const missing = start + duration - sourceEnd;
-  const atEnd = Number.isFinite(sourceEnd) && missing > 0 && missing <= 1 + tolerance && sourceEnd > start;
+  const atEnd = Number.isFinite(sourceEnd) && missing > 0 && missing <= tolerance && sourceEnd > start;
   const expected = atEnd ? sourceEnd - start : duration;
-  const valid = Boolean(video && audio && Number.isFinite(measured) && measured > 0 && Math.abs(measured - expected) <= tolerance);
+  const tracks = [video, audio];
+  // Some containers omit stream durations. Validate available values without
+  // requiring subsecond timestamps to accept an otherwise complete clip.
+  const spansValid = tracks.every(stream => !Number.isFinite(Number(stream?.duration)) || (Number(stream.duration) > 0 && Math.abs(Number(stream.duration) - expected) <= tolerance));
+  const starts = tracks.map(stream => Number(stream?.start_time));
+  const startsValid = starts.every(time => !Number.isFinite(time) || Math.abs(time) <= tolerance)
+    && (!starts.every(Number.isFinite) || Math.abs(starts[0] - starts[1]) <= tolerance);
+  const valid = Boolean(video && audio && Number.isFinite(measured) && measured > 0 && Math.abs(measured - duration) <= tolerance && Math.abs(measured - expected) <= tolerance && spansValid && startsValid);
   return { valid, measured, expected, atEnd: valid && atEnd, tolerance };
 }
 
@@ -90,7 +113,7 @@ function note(task, cues, key) {
   return `---\ntags: ${JSON.stringify(tags)}\ncreated: ${JSON.stringify(new Date().toISOString().slice(0, 10))}\nsource: ${JSON.stringify(`https://www.bilibili.com/video/${task.id}/?p=${task.part}&t=${task.start}`)}${task.summary?.trim() ? '\nsummary: ' + JSON.stringify(task.summary.trim()) : ''}\n---\n\n![[Bili-Peek附件/${key}.mp4]]\n\n## 片段字幕\n\n时间以片段起点为 00:00。${cues.some(cue => cue.clipped) ? '选区边界处保留字幕整句。' : ''}\n\n${readingParagraphs(cues, true)}\n`;
 }
 
-async function exportClip(task, config, runner = run, onProgress = () => {}) {
+async function exportClip(task, config, runner = run, onProgress = () => {}, services = {}) {
   const began = performance.now(), timings = {};
   let stageBegan = began, currentStage;
   const stage = name => {
@@ -131,17 +154,35 @@ async function exportClip(task, config, runner = run, onProgress = () => {}) {
   } catch {}
   const temp = await fs.mkdtemp(path.join(attachments, '.pending-'));
   try {
-    const tempVideo = path.join(temp, 'clip.mp4'), duration = task.end - task.start;
+    const tempVideo = path.join(temp, 'clip.mp4'); let duration = task.end - task.start;
+    const requestedStart = task.start;
+    const mediaThreads = Math.max(2, Math.min(8, Math.ceil(require('node:os').availableParallelism() / 2)));
     const headers = 'Referer: https://www.bilibili.com/\r\nUser-Agent: Mozilla/5.0\r\n';
-    const inputArgs = url => ['-protocol_whitelist', 'https,tls,tcp,crypto', '-rw_timeout', '30000000', '-headers', headers, '-ss', String(task.start), '-i', url];
+    let sources = task;
+    if (task.downloadEngine === 'nre') {
+      if (!services.download) throw new Error('分片下载试验尚未启用');
+      stage('download');
+      sources = await services.download(task, temp, update => onProgress({ ...update, elapsedSeconds: Math.floor((performance.now() - began) / 1000) }));
+      result.download = { downloadedBytes: sources.downloadedBytes, receivedBytes: sources.receivedBytes, seconds: sources.downloadSeconds, sources: sources.sources, network: sources.network };
+      if (task.cutMode === 'keyframe') {
+        if (!Number.isFinite(sources.cutStart) || sources.cutStart < 0 || sources.cutStart > task.start) throw new Error('快速截取的关键帧起点无效');
+        task = { ...task, start: sources.cutStart }; duration = task.end - task.start;
+        cues = selectCues(task.subtitles, task.start, task.end); result.hasSubtitles = cues.length > 0;
+        result.actualStart = task.start; result.requestedStart = requestedStart;
+      }
+    }
+    const inputArgs = (url, origin = 0) => sources === task
+      ? ['-threads', '2', '-protocol_whitelist', 'https,tls,tcp,crypto', '-rw_timeout', '30000000', '-headers', headers, '-ss', String(task.start), '-i', url]
+      : ['-threads', '2', '-seek_timestamp', '1', '-ss', String(task.start + origin), '-i', url];
     const progress = seconds => onProgress({ stage: currentStage, percent: Math.min(99, Math.max(0, Math.floor(seconds / duration * 100))), elapsedSeconds: Math.floor((performance.now() - began) / 1000) });
     stage('media');
-    await runner(config.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-progress', 'pipe:1', '-stats_period', '1', ...inputArgs(task.videoUrl), ...inputArgs(task.audioUrl), '-map', '0:v:0', '-map', '1:a:0', '-t', String(duration), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-c:a', 'aac', '-b:a', '160k', '-avoid_negative_ts', 'make_zero', '-movflags', '+faststart', tempVideo], 600000, progress);
+    const encoding = task.cutMode === 'keyframe' ? ['-c:v', 'copy', '-c:a', 'copy'] : ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-threads:v', String(mediaThreads), '-c:a', 'aac', '-b:a', '160k', '-threads:a', '1'];
+    await runner(config.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-filter_threads', '2', '-progress', 'pipe:1', '-stats_period', '1', ...inputArgs(sources.videoUrl, sources.videoOrigin), ...inputArgs(sources.audioUrl, sources.audioOrigin), '-map', '0:v:0', '-map', '1:a:0', '-t', String(duration), ...encoding, '-avoid_negative_ts', 'make_zero', '-movflags', '+faststart', tempVideo], { idleMs: 120000 }, progress);
     stage('probe');
     const probe = JSON.parse(await runner(config.ffprobe, ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', tempVideo], 30000));
     let check = mediaCheck(probe, duration);
-    if (!check.valid && Number.isFinite(check.measured) && check.measured < duration) {
-      const sourceEnds = await Promise.all([task.videoUrl, task.audioUrl].map(async url => {
+    if (Number.isFinite(check.measured) && check.measured < duration - .5) {
+      const sourceEnds = Number.isFinite(sources.sourceEnd) ? [sources.sourceEnd, sources.sourceEnd] : await Promise.all([task.videoUrl, task.audioUrl].map(async url => {
         try {
           const info = JSON.parse(await runner(config.ffprobe, ['-v', 'error', '-protocol_whitelist', 'https,tls,tcp,crypto', '-rw_timeout', '15000000', '-headers', headers, '-show_format', '-of', 'json', url], 20000));
           const end = Number(info.format?.duration); return Number.isFinite(end) && end > 0 ? end : NaN;
@@ -154,24 +195,36 @@ async function exportClip(task, config, runner = run, onProgress = () => {}) {
     if (check.atEnd) { cues = selectCues(task.subtitles, task.start, task.start + check.expected); result.hasSubtitles = cues.length > 0; }
     // Decode the result too; a readable container alone does not prove usable media.
     stage('verify');
-    await runner(config.ffmpeg, ['-v', 'error', '-xerror', '-nostdin', '-progress', 'pipe:1', '-stats_period', '1', '-i', tempVideo, '-f', 'null', '-'], 300000, progress);
+    await runner(config.ffmpeg, ['-v', 'error', '-xerror', '-nostdin', '-threads', '2', '-filter_threads', '2', '-progress', 'pipe:1', '-stats_period', '1', '-i', tempVideo, '-threads', '2', '-f', 'null', '-'], { idleMs: 120000 }, progress);
     stage('write');
+    await services.checkpoint?.();
     const ending = check.atEnd ? `\n> 视频到达源文件末尾，实际保存时长 ${measured.toFixed(2)} 秒；页面标示时长与源文件略有差异。\n` : '';
-    await fs.writeFile(path.join(temp, 'note.md'), note(task, cues, key) + ending, 'utf8');
+    const fastInfo = task.cutMode === 'keyframe' ? `\n> 快速截取：请求起点 ${stamp(requestedStart)}，实际关键帧起点 ${stamp(task.start)}；字幕按实际起点计时。\n` : '';
+    await fs.writeFile(path.join(temp, 'note.md'), note(task, cues, key) + ending + fastInfo, 'utf8');
     // Exclusive commits never overwrite existing notes or attachments.
     const files = [['clip.mp4', videoPath], ['note.md', notePath]];
     for (const [source, target] of files) {
       try { await fs.link(path.join(temp, source), target); }
-      catch (error) { if (error.code !== 'EEXIST' || source === 'note.md') throw error; }
+      catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+        if (source === 'note.md') {
+          // Another concurrent video may have committed the same title since our initial check.
+          const alternate = `${baseName} - ${key.slice(0, 8)}.md`;
+          const alternatePath = path.join(output, alternate);
+          await fs.link(path.join(temp, source), alternatePath);
+          Object.assign(result, { filename: alternate, notePath: alternatePath, obsidianUri: `obsidian://open?path=${encodeURIComponent(alternatePath)}` });
+        }
+      }
     }
     for (const [filename] of files) await fs.unlink(path.join(temp, filename));
+    for (const filename of ['video.mp4', 'audio.mp4']) await fs.rm(path.join(temp, filename), { force: true });
     await fs.rmdir(temp);
     stage('complete');
     timings.total = +((performance.now() - began) / 1000).toFixed(2);
     return { ...result, duration: measured, timings };
   } catch (error) {
     try {
-      for (const filename of ['clip.mp4', 'note.md']) await fs.unlink(path.join(temp, filename)).catch(err => { if (err.code !== 'ENOENT') throw err; });
+      for (const filename of ['clip.mp4', 'note.md', 'video.mp4', 'audio.mp4']) await fs.unlink(path.join(temp, filename)).catch(err => { if (err.code !== 'ENOENT') throw err; });
       await fs.rmdir(temp);
     } catch { error.message += '；部分暂存文件未能清理'; }
     throw error;

@@ -2,7 +2,8 @@ const http = require('node:http');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { exportClip, validateTask, keyFor } = require('./export.cjs');
+const { exportClip, validateTask, keyFor, run } = require('./export.cjs');
+const { downloadTracks, TransferControl, cleanError } = require('./segment-download.cjs');
 const { consumePairing, fingerprint } = require('./pairing.cjs');
 const configPath = process.env.BILI_PEEK_CONFIG || path.resolve(__dirname, '../.local/export-config.json');
 
@@ -16,15 +17,42 @@ function signWbi(input) {
   return query + '&w_rid=' + crypto.createHash('md5').update(query + mix).digest('hex');
 }
 
-async function main() {
-  const config = JSON.parse(await fs.readFile(configPath, 'utf8'));
+async function main({ configFile = configPath, exporter = exportClip, downloader = downloadTracks } = {}) {
+  const config = JSON.parse(await fs.readFile(configFile, 'utf8'));
   if (typeof config.token !== 'string' || config.token.length < 32) throw new Error('请配置至少 32 字符的配对令牌');
   await Promise.all([fs.access(config.ffmpeg), fs.access(config.ffprobe), fs.access(path.join(config.vault, '.obsidian'))]);
-  const directory = path.dirname(configPath);
-  const jobs = new Map(); let active = null, browserAcknowledged = 0, ready = false;
+  const directory = path.dirname(configFile);
+  config.segmentDownloader = path.resolve(__dirname, '../.tools/N_m3u8DL-RE.exe');
+  const segmentAvailable = config.segmentNative !== false || await fs.access(config.segmentDownloader).then(() => true, () => false);
+  const routes = new Map(), controls = new Map();
+  const jobs = new Map(), active = new Map(), queue = [];
+  let browserAcknowledged = 0, ready = false;
+  const pump = () => {
+    // A shared video's range cache must have only one writer. Other videos can run together.
+    while (active.size < 2) {
+      const index = queue.findIndex(({ task }) => ![...active.values()].some(other => other.id === task.id && other.cid === task.cid));
+      if (index < 0) break;
+      const { task, key, control } = queue.splice(index, 1)[0];
+      active.set(key, task); jobs.set(key, { state: 'processing', stage: 'prepare', percent: 0 });
+      const controlledRun = async (executable, args, timeout, progress) => {
+        const c = control.controller();
+        try { return await run(executable, args, { ...(typeof timeout === 'object' ? timeout : {}), ...(typeof timeout === 'number' ? { idleMs: timeout } : {}), signal: c.signal }, progress); }
+        finally { control.release(c); }
+      };
+      Promise.resolve().then(() => exporter(task, config, controlledRun, progress => jobs.set(key, { state: 'processing', ...progress }), {
+        checkpoint: async () => { await control.wait(); control.canCancel = false; },
+        download: (task, work, progress) => downloader(task, config, run, progress, control, routes, work)
+      })).then(result => {
+        jobs.set(key, { state: 'complete', ...result });
+        if (result.timings) fs.appendFile(path.resolve(__dirname, '../.local/export-timings.jsonl'), JSON.stringify({ at: new Date().toISOString(), key, duration: result.duration, timings: result.timings, ...(result.download ? { download: result.download } : {}) }) + '\n').catch(() => {});
+      }, error => jobs.set(key, { state: control.cancelled ? 'cancelled' : 'failed', error: cleanError(error) })).finally(() => { active.delete(key); controls.delete(key); pump(); });
+    }
+    queue.forEach(({ key }, index) => jobs.set(key, { state: 'processing', stage: 'queued', percent: 0, queuePosition: index + 1, canPause: false }));
+  };
   const server = http.createServer(async (req, res) => {
     const send = (code, body) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(body)); };
     if (req.headers.host !== `127.0.0.1:${config.port || 18766}` || (req.headers.origin && req.headers.origin !== 'https://www.bilibili.com')) return send(403, { error: '请求来源无效' });
+    for (const [prefix, handler] of routes) if (req.url.startsWith(prefix + '/')) return handler(req, res);
     if (req.method === 'POST' && req.url === '/pair') {
       try { return send(200, await consumePairing(req.headers['x-bili-peek-ticket'], config, directory)); }
       catch { return send(401, { error: '连接凭证无效或已过期，请从 CPod 重新启动连接' }); }
@@ -38,9 +66,26 @@ async function main() {
           browserAcknowledged = Date.now();
         } catch { return send(500, { error: '无法保存浏览器连接状态' }); }
       }
-      return send(200, { ready, active: Boolean(active), pid: process.pid });
+      return send(200, { ready, active: active.size > 0 || queue.length > 0, activeCount: active.size, queuedCount: queue.length, pid: process.pid, segmentAvailable });
     }
     if (req.method === 'GET' && /^\/jobs\/[a-f0-9]{20}$/.test(req.url)) return send(200, jobs.get(req.url.slice(6)) || { state: 'missing' });
+    const action = /^\/jobs\/([a-f0-9]{20})\/(pause|resume|cancel)$/.exec(req.url);
+    if (req.method === 'POST' && action) {
+      const control = controls.get(action[1]);
+      if (!control) return send(409, { error: '任务已结束或不在当前助手中' });
+      try {
+        const queued = queue.findIndex(item => item.key === action[1]);
+        if (queued >= 0) {
+          if (action[2] !== 'cancel') return send(409, { error: '排队中的任务尚未开始下载' });
+          control.cancel(); queue.splice(queued, 1); controls.delete(action[1]);
+          jobs.set(action[1], { state: 'cancelled' }); pump(); return send(200, { cancelled: true, paused: false });
+        }
+        control[action[2]]();
+        const progress = jobs.get(action[1]);
+        jobs.set(action[1], { ...progress, paused: control.paused, ...(control.paused ? { bytesPerSecond: 0, etaSeconds: null } : {}) });
+        return send(200, { paused: control.paused, cancelled: control.cancelled });
+      } catch (error) { return send(409, { error: error.message }); }
+    }
     if (req.method !== 'POST' || !['/clips', '/sign-wbi'].includes(req.url)) return send(404, { error: '未找到接口' });
     try {
       const chunks = []; let size = 0;
@@ -48,14 +93,13 @@ async function main() {
       const input = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       if (req.url === '/sign-wbi') return send(200, { query: signWbi(input) });
       const task = validateTask(input), key = keyFor(task);
-      if (active === key) return send(202, { key });
-      if (active) return send(409, { error: '另一片段正在保存，请完成后重试' });
-      if (jobs.size > 100) jobs.delete(jobs.keys().next().value);
-      active = key; jobs.set(key, { state: 'processing' }); send(202, { key });
-      exportClip(task, config, undefined, progress => jobs.set(key, { state: 'processing', ...progress })).then(result => {
-        jobs.set(key, { state: 'complete', ...result });
-        if (result.timings) fs.appendFile(path.resolve(__dirname, '../.local/export-timings.jsonl'), JSON.stringify({ at: new Date().toISOString(), key, duration: result.duration, timings: result.timings }) + '\n').catch(() => {});
-      }, error => jobs.set(key, { state: 'failed', error: error.message })).finally(() => { active = null; });
+      if (task.downloadEngine && task.downloadEngine !== 'nre') throw new Error('下载方式无效');
+      if (task.downloadEngine === 'nre' && !segmentAvailable) throw new Error('分片下载工具尚未安装');
+      if (controls.has(key)) return send(202, { key });
+      if (queue.length >= 50) return send(429, { error: '等待保存的任务过多，请稍后再试' });
+      if (jobs.size >= 100) { const ended = [...jobs.keys()].find(key => !controls.has(key)); if (ended) jobs.delete(ended); }
+      const control = new TransferControl(); controls.set(key, control);
+      queue.push({ task, key, control }); pump(); send(202, { key });
     } catch (error) { send(400, { error: error.message }); }
   });
   server.requestTimeout = 30000;
@@ -66,6 +110,7 @@ async function main() {
     ready = true;
     console.log(`Bili-Peek 助手已启动，保存目录：${config.output}`);
   });
+  return server;
 }
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });
 module.exports = { main, signWbi };

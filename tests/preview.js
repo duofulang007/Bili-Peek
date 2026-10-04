@@ -2,6 +2,7 @@
 document.getElementById('run-tests').disabled = false;
 document.getElementById('theme').addEventListener('click', () => document.body.classList.toggle('light'));
 document.getElementById('run-tests').addEventListener('click', async () => {
+  const uiProof = new URL(location.href).searchParams.has('ui-proof');
   const results = document.getElementById('test-results'), button = document.getElementById('run-tests');
   button.disabled = true; delete document.body.dataset.testResult; results.textContent = '';
   const lines = []; let passed = 0;
@@ -101,7 +102,7 @@ document.getElementById('run-tests').addEventListener('click', async () => {
     expect(ui('jump-end').disabled, '超出视频时长禁止终点跳转');
     ui('clip-end').value = '1:20'; ui('clip-end').dispatchEvent(new Event('change')); ui('save-clip').click();
     await confirmSave(true);
-    expect(GM_getValue('clip-drafts', []).some(item => item.start === 50 && item.end === 80) && ui('status').textContent.includes('尚未导出'), '未配对时保存选区草稿，明确音视频尚未导出');
+    expect(ui('status').textContent.includes('尚未导出') && ui('status').textContent.includes('0:50'), '未配对时提示选区未导出，明确音视频尚未保存');
     expect(panel().nextElementSibling === recommendations && recommendations.querySelectorAll('.video-page-card-small').length === 3, '推荐视频整体下移，全部原节点保留');
     expect(document.querySelector('.up-panel-container').compareDocumentPosition(panel()) & Node.DOCUMENT_POSITION_FOLLOWING, 'UP 主信息保留在上方');
     expect(Math.abs(panel().getBoundingClientRect().top-document.getElementById('bilibili-player').getBoundingClientRect().top)<2, '词云顶部与播放器顶部平齐，UP 信息上移');
@@ -116,6 +117,18 @@ document.getElementById('run-tests').addEventListener('click', async () => {
     const rect = ui('density').getBoundingClientRect();
     ui('density').dispatchEvent(new PointerEvent('pointermove',{clientX:rect.left+(32+100/160*276)/320*rect.width,clientY:rect.top+rect.height*.5}));
     expect(ui('tooltip').textContent.includes('内存') && ui('tooltip').textContent.includes('1:40'), '图内悬停显示时间、弹幕数和相关原文');
+    expect(ui('tooltip').getBoundingClientRect().bottom <= ui('density').getBoundingClientRect().top && getComputedStyle(ui('tooltip')).pointerEvents === 'none', '悬停详情位于图上方，不遮挡图表或截获鼠标');
+    const stableDensityTop = ui('density').getBoundingClientRect().top;
+    ui('density').dispatchEvent(new PointerEvent('pointerleave'));
+    expect(ui('density').getBoundingClientRect().top === stableDensityTop, '隐藏详情不会改变图表位置');
+    // 0.3.39: the detail area must not reserve a permanent block above the chart.
+    const info = panel().shadowRoot.querySelector('.timeline-info');
+    expect(info.getBoundingClientRect().height === 0 && getComputedStyle(info).position === 'absolute', '未悬停时详情区不占高度，密度图不再被上方空白挤压');
+    expect(ui('density').getBoundingClientRect().height >= 150, `密度图不再被预留的详情区挤压（实测 ${Math.round(ui('density').getBoundingClientRect().height)}px）`);
+    // Sparse regions must still describe themselves instead of showing an empty bubble.
+    const sparse = rect.left + (32 + 56 / 160 * 276) / 320 * rect.width;
+    ui('density').dispatchEvent(new PointerEvent('pointermove', { clientX: sparse, clientY: rect.top + rect.height * .5 }));
+    expect(ui('tooltip').textContent.includes('0:56') && ui('tooltip').textContent.trim().length > 0, '稀疏时段的悬停详情仍有时间与条数');
     ui('clear').click(); expect(!ui('density').querySelector('.match'), '清除词语筛选恢复完整密度图');
     ui('mode-phrases').click();
     expect(ui('cloud').querySelectorAll('[data-term]').length > 0 && loaded(), '短语词云与密度图仍同时显示');
@@ -144,22 +157,67 @@ document.getElementById('run-tests').addEventListener('click', async () => {
     await part(1); await until(()=>loaded(),'恢复第一 P 未完成');
     window.fixtureExport = 'success'; GM_setValue('export-token', 'a'.repeat(64));
     ui('save-clip').click();
+    await until(() => ui('export-quality'), '未显示下载画质');
+    expect(ui('export-quality').value === '80' && ui('export-quality').options.length === 4, '实际可下载画质列表默认 1080P，不跟随播放器画质');
+    ui('export-quality').value = '64'; ui('export-quality').dispatchEvent(new Event('input', { bubbles: true }));
     await confirmSave();
+    const savedProgressNode = ui('transfer-progress');
     expect(ui('save-clip').disabled, '导出处理中阻止重复保存');
-    await until(() => ui('status').textContent.includes('42%'), '未显示助手处理进度');
-    expect(ui('status').textContent === '保存中 · 42%' && ui('status').title.includes('下载并裁剪') && ui('status').title.includes('已用 8 秒'), '简洁显示进度，悬停查看阶段和耗时（模拟助手）');
-    await until(() => ui('status').textContent.includes('视频、字幕和笔记已保存'), '未接收助手完成结果');
+    await until(() => ui('transfer-progress').value === 42, '未显示整体处理进度');
+    expect(ui('transfer-detail').textContent.includes('下载并裁剪') && ui('transfer-detail').textContent.includes('已用 8 秒') && !ui('status').textContent, '整体进度条集中显示阶段和已用时间（模拟助手）');
+    await until(() => ui('transfer-detail').textContent.includes('视频、字幕和笔记已保存'), '未接收助手完成结果');
+    expect(ui('transfer-progress') === savedProgressNode && !ui('export-transfer').hidden && ui('transfer-progress').value === 100, '从准备到完成保留同一个进度条，完成后不替换或收起');
     expect(window.fixtureLatestClip.cid === 1001 && window.fixtureLatestClip.part === 1 && window.fixtureLatestClip.start === 0 && window.fixtureLatestClip.end === 30 && window.fixtureLatestClip.subtitles[0].content === '测试字幕整句', '导出提交当前分 P、选区和字幕快照（模拟助手）');
     expect(window.fixtureLatestClip.noteName === '我的片段笔记' && window.fixtureLatestClip.tags.join(',') === '测试/片段,学习' && window.fixtureLatestClip.summary === '简单描述', '保存表单提交自定义名称、必填标签和摘要');
+    expect(!window.fixtureLatestClip.downloadEngine, '分片试验不会自动成为默认下载方式');
+    expect(window.fixtureLatestClip.downloadQuality === 64 && window.fixtureLatestClip.videoUrl.includes('video-64'), '手动选择下载画质后请求对应轨道');
     expect(!ui('open-note').hidden && ui('open-note').href.startsWith('obsidian://open?path='), '成功后显示打开笔记图标');
+    expect(ui('open-note').parentElement === ui('transfer-detail').parentElement && ui('open-note').textContent.includes('打开笔记') && getComputedStyle(ui('open-note')).position !== 'absolute', '保存结果与文字按钮在同一行，无绝对定位错位');
+    if (uiProof) {
+      ui('density').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+      log('界面预览停留在悬停详情与保存完成状态。'); return;
+    }
     window.fixtureExport = 'fail'; ui('save-clip').click();
     await confirmSave();
-    await until(() => ui('status').textContent.includes('模拟写入失败'), '未显示助手失败');
-    expect(!ui('status').textContent.includes('已保存') && !ui('save-clip').disabled, '助手写入失败不报告成功，允许重试');
+    await until(() => ui('transfer-detail').textContent.includes('模拟写入失败'), '未显示助手失败');
+    expect(!ui('transfer-detail').textContent.includes('已保存') && !ui('save-clip').disabled, '助手写入失败不报告成功，允许重试');
+    expect(ui('transfer-progress') === savedProgressNode && !ui('export-transfer').hidden, '失败也保留原进度条和失败文字，不创建新进度条');
     ui('save-clip').click(); await until(() => ui('export-name'), '重试未打开表单');
     expect(ui('export-name').value === '我的片段笔记' && ui('export-tags').value.includes('测试/片段') && ui('export-summary').value === '简单描述', '失败重试保留名称、标签和摘要');
     expect(ui('export-dialog').querySelector('.clip-summary').textContent.includes('0:00–0:30') && ui('recent-tags').children.length > 0, '保存前显示片段范围和最近标签');
     ui('export-cancel').click();
+    await until(() => !ui('save-clip').disabled, '取消表单后保存按钮未恢复');
+    window.fixtureSegments = true; window.fixtureExport = 'success';
+    ui('save-clip').click(); await until(() => ui('export-dialog'), '分片保存表单未打开');
+    expect(!ui('export-dialog').querySelector('input[type="checkbox"]') && !ui('export-fast'), '保存表单不再显示下载方式或快速截取选项');
+    await confirmSave();
+    await until(() => !ui('transfer-pause').hidden && ui('transfer-detail').textContent.includes('2.0 MB/s'), '未显示下载速率');
+    expect(window.fixtureLatestClip.downloadEngine === 'nre' && ui('transfer-progress').value === 37 && ui('transfer-detail').textContent.includes('42.0 MB / 100.0 MB'), '统一进度条保留下载实际字节与速率（模拟助手）');
+    expect(!window.fixtureLatestClip.cutMode, '自动并行下载仍精确保存所选范围，不提前到关键帧');
+    ui('transfer-pause').click();
+    await until(() => ui('transfer-pause').textContent === '继续', '暂停未变为继续');
+    expect(ui('transfer-detail').textContent.includes('已暂停') && ui('transfer-detail').textContent.includes('0.0 MB/s'), '暂停状态显示零速率与继续按钮');
+    await part(2); await until(() => loaded(), '下载期间切换到另一个视频分 P 未完成');
+    expect(!ui('save-clip').disabled && ui('export-transfer').hidden, '已有保存任务不锁住新视频的保存按钮，也不显示另一任务的进度');
+    await part(1); await until(() => loaded() && ui('transfer-pause').textContent === '继续', '返回原视频未恢复暂停任务进度');
+    expect(ui('transfer-progress') === savedProgressNode && !ui('export-transfer').hidden, '返回原视频仍使用原来的同一个进度条');
+    ui('transfer-pause').click(); await until(() => ui('transfer-pause').textContent === '暂停', '继续后未恢复');
+    expect(ui('transfer-detail').textContent.includes('2.0 MB/s'), '继续后恢复速率');
+    window.fixtureStage = 'queued';
+    await until(() => ui('transfer-detail').textContent.includes('等待保存'), '未显示排队文字');
+    expect(ui('transfer-progress') === savedProgressNode && !ui('transfer-cancel').disabled, '排队只更新文字，保留同一进度条并可取消');
+    window.fixtureStage = 'media';
+    await until(() => ui('transfer-detail').textContent.includes('裁剪视频'), '未显示裁剪阶段');
+    expect(ui('transfer-progress').value >= 80 && !ui('status').textContent && ui('export-transfer').querySelectorAll('progress').length === 1, '下载和裁剪共用一个进度条，阶段文字不再重复显示');
+    window.fixtureStage = 'verify';
+    await until(() => ui('transfer-detail').textContent.includes('检查完整性'), '未显示核验阶段');
+    expect(ui('transfer-progress').value >= 94, '切换核验阶段时整体进度不归零');
+    window.fixtureStage = undefined;
+    await until(() => ui('transfer-detail').textContent.includes('2.0 MB/s'), '未恢复下载显示');
+    expect(ui('transfer-progress').value >= 94, '迟到的下载状态不会使整体进度倒退');
+    ui('transfer-cancel').click(); await until(() => ui('transfer-detail').textContent.includes('保存已取消'), '未确认取消结果');
+    expect(!ui('export-transfer').hidden && ui('transfer-cancel').hidden && !ui('save-clip').disabled, '取消后保留原进度条，隐藏操作并可重试');
+    window.fixtureSegments = false; window.fixturePaused = false; window.fixtureCancelled = false;
     window.fixtureEmptyNext = true; await part(3);
     await until(() => !ui('clip-start').disabled, '无弹幕时选区控件未启用');
     expect(ui('density').textContent.includes('暂无弹幕') && !ui('density').querySelector('.curve') && !ui('save-clip').disabled, '无弹幕时显示可用时间轴，不伪造密度曲线，仍可截取');
@@ -168,13 +226,19 @@ document.getElementById('run-tests').addEventListener('click', async () => {
     expect(ui('clip-duration').textContent === '12 秒', '无弹幕时支持修改区间、统计时长和定位');
     window.fixtureExport = 'success'; ui('save-clip').click();
     await confirmSave();
-    await until(() => ui('status').textContent.includes('视频、字幕和笔记已保存'), '无弹幕时未提交导出');
+    await until(() => ui('transfer-detail').textContent.includes('视频、字幕和笔记已保存'), '无弹幕时未提交导出');
     expect(window.fixtureLatestClip.cid === 1003 && window.fixtureLatestClip.end === 12, '无弹幕时仍能提交正确分 P 的视频和字幕（模拟助手）');
     window.fixtureNoSubtitles = true; ui('save-clip').click(); await confirmSave();
-    await until(() => ui('status').textContent.includes('未保存字幕'), '视频单独保存未明确缺少字幕');
+    await until(() => ui('transfer-detail').textContent.includes('未保存字幕'), '视频单独保存未明确缺少字幕');
     expect(!ui('export-dialog') && window.fixtureLatestClip.videoOnly === true && window.fixtureLatestClip.subtitles.length === 0, '无字幕自动保存视频并注明，不弹额外确认');
     window.fixtureNoSubtitles = false;
-    expect(getComputedStyle(ui('cloud-note')).display === 'none' && ui('cloud').parentElement.querySelector('figcaption').title.includes('显示'), '词云说明收起到标题悬停提示');
+    window.fixtureDownloadQualities = [64, 32];
+    ui('save-clip').click(); await until(() => ui('export-quality'), '缺少 1080P 时未显示画质列表');
+    expect(ui('export-quality').value === '64' && ui('export-quality').options.length === 2, '原视频没有 1080P 时默认实际可下载的最高画质');
+    await confirmSave(); await until(() => ui('transfer-detail').textContent.includes('已保存'), '最高画质保存未完成');
+    expect(window.fixtureLatestClip.downloadQuality === 64, '最高可下载画质与提交轨道一致');
+    window.fixtureDownloadQualities = undefined;
+    expect(getComputedStyle(ui('cloud-note')).display === 'none' && ui('cloud-caption').title.includes('显示'), '词云说明收起到标题悬停提示');
     await until(() => !ui('seek-status').textContent, '定位提示未自动消失');
     expect(!ui('seek-status').textContent, '定位提示自动消失');
     await part(4); await until(() => loaded(), '观看测试分 P 未加载');
@@ -189,7 +253,8 @@ document.getElementById('run-tests').addEventListener('click', async () => {
     const history = GM_getValue('watch-history', {})['BVLocalPreview:p4']?.ranges || [];
     expect(history.some(([start, end]) => start <= 21 && end >= 21) && history.some(([start, end]) => start <= 61 && end >= 61) && !history.some(([start, end]) => start < 40 && end > 40), '累计观看记录保存在当前分 P，跳过区间保持空白');
     const segment = ui('watch-track').querySelector('.watch-segment'); segment.focus();
-    expect(!ui('tooltip').hidden && ui('tooltip').textContent.includes('已观看'), '聚焦观看轨迹显示区间详情'); segment.blur();
+    expect(!ui('tooltip').hidden && ui('tooltip').textContent.includes('已观看'), '聚焦观看轨迹显示区间详情');
+    expect(ui('tooltip').getBoundingClientRect().bottom <= ui('density').getBoundingClientRect().top, '观看区间详情位于图上方，不遮住轨迹'); segment.blur();
     const savedToken = GM_getValue('export-token', '');
     window.fixtureExport = 'success';
     await until(() => loaded(), 'CPod 启动后面板未恢复');
@@ -206,5 +271,5 @@ document.getElementById('run-tests').addEventListener('click', async () => {
     log(`\n全部 ${passed} 项页面验收通过（模拟弹幕、真实浏览器媒体元素；非 B 站实测）。`);
     document.body.dataset.testResult='passed';
   } catch(error) {log('\n✗ '+error.message);document.body.dataset.testResult='failed';}
-  finally {window.fixtureFailNext=false;window.fixtureHelperOffline=false;window.fixtureExport=false;window.fixtureNoSubtitles=false;GM_setValue('export-token',previousToken);button.disabled=false;}
+  finally {if (!uiProof) {window.fixtureFailNext=false;window.fixtureHelperOffline=false;window.fixtureExport=false;window.fixtureNoSubtitles=false;GM_setValue('export-token',previousToken);} button.disabled=false;}
 });

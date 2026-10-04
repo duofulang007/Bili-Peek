@@ -2,6 +2,15 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { formatTime, routeKey, seekMedia } = require('../Bili-Peek.user.js');
 
+test('one overall export bar stays monotonic through source, download, cut and verification', () => {
+  const { overallProgress } = require('../Bili-Peek.user.js');
+  let value = 0;
+  for (const [stage, percent, expected] of [['prepare', undefined, 1], ['source', undefined, 3], ['download', 100, 80], ['media', 0, 80], ['media', 100, 92], ['probe', undefined, 92], ['verify', 0, 94], ['download', 20, 94], ['verify', 100, 99], ['write', undefined, 99], ['complete', undefined, 100]]) {
+    value = overallProgress(stage, percent, true, value); assert.equal(value, expected);
+  }
+  assert.equal(overallProgress('media', 100, false), 92);
+});
+
 class Media extends EventTarget {
   constructor({ paused = true, refuse = false } = {}) {
     super();

@@ -8,6 +8,8 @@ Bili-Peek 是用于 Edge / Tampermonkey 的 B 站观看助手：用户脚本 `Bi
 - 三个入口各自独立：用户脚本（浏览器侧）、助手（Node 侧）、`.apex/module.json`（ControlPod 侧）。改一处要确认另一处是否受影响。
 - `.local/`、`.tools/`、`node_modules/`、`tests/artifacts/`、`tests/export-sandbox/`、`.workbuddy/` 由 `.gitignore` 排除，不进提交。
 - `docs/` 与 `初稿方案.md` 是历史设计与概念演示，不代表已实现功能；不要照它改代码。
+- 用户脚本里的 `module.exports` 分支只在 Node 下走（`typeof document === 'undefined'`），供 `tests/*.test.cjs` 直接 require；改导出名要同步改测试。
+- 助手侧「内置并行下载」是默认路径；`config.segmentNative: false` 切到 N_m3u8DL-RE 对照路径，被 `tests/segment-download.test.cjs` 当对照基准用，不要当成死代码删除。
 
 ## 必须保持
 
@@ -17,6 +19,7 @@ Bili-Peek 是用于 Edge / Tampermonkey 的 B 站观看助手：用户脚本 `Bi
 4. 删除笔记、附件或配对信息前先预览并确认；不清理 Obsidian 中仍有引用的文件。
 5. `.tools/ffmpeg.exe` 与 `.tools/ffprobe.exe` 是导出和媒体测试的前提，缺失时用 `python helper/download-tools.py` 重建，不要提交二进制。
 6. 浏览器油猴脚本与 Obsidian 阅读插件是独立安装副本；改动它们需要在真实浏览器 / Obsidian 中另行安装与验收。
+7. 单次选区上限 30 分钟由 `helper/export.cjs` 的 `validateTask` 强制，前端不预先拦截；改这个上限要同时看前端提示与 README 的「图内操作」。
 
 ## 验证
 

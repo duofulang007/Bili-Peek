@@ -51,14 +51,32 @@ test('WBI signing only includes supported parameters and strips reserved symbols
   assert.equal(result.get('bvid'), 'BV1xx411c7mD'); assert.equal(result.has('injected'), false);
   assert.match(result.get('w_rid'), /^[a-f0-9]{32}$/);
 });
-test('short end accepts only proven source endings, still rejects incomplete media or missing tracks', () => {
+test('second-level duration tolerance retains proven source-ending notes and rejects missing tracks', () => {
   const probe = { format: { duration: '12.565333' }, streams: [{ codec_type: 'video', avg_frame_rate: '30/1' }, { codec_type: 'audio' }] };
-  assert.equal(mediaCheck(probe, 13).valid, false);
+  assert.equal(mediaCheck(probe, 13).valid, true);
   assert.equal(mediaCheck(probe, 13, 12.533333).valid, true);
   assert.equal(mediaCheck(probe, 13, 12.533333).atEnd, true);
-  assert.equal(mediaCheck(probe, 13, 30).valid, false);
+  assert.equal(mediaCheck(probe, 13, 30).valid, true);
   assert.equal(mediaCheck(probe, 20, 12.533333).valid, false);
   assert.equal(mediaCheck({ ...probe, streams: [probe.streams[0]] }, 13, 12.533333).valid, false);
+});
+
+test('duration allows one second on either side without requiring detailed stream timestamps', () => {
+  const probe = measured => ({ format: { duration: String(measured) }, streams: [{ codec_type: 'video', avg_frame_rate: '30/1' }, { codec_type: 'audio' }] });
+  assert.equal(mediaCheck(probe(219.43), 219.27).valid, true);
+  for (const measured of [199, 200, 201]) assert.equal(mediaCheck(probe(measured), 200).valid, true);
+  for (const measured of [198.99, 201.01, 0, NaN]) assert.equal(mediaCheck(probe(measured), 200).valid, false);
+});
+
+test('second-level tolerance still rejects known truncated or misaligned tracks', () => {
+  const probe = { format: { duration: '263.07' }, streams: [
+    { codec_type: 'video', avg_frame_rate: '30/1', start_time: '0.08', duration: '262.99' },
+    { codec_type: 'audio', start_time: '0.06', duration: '262.94' }
+  ] };
+  assert.equal(mediaCheck(probe, 262.91).valid, true);
+  assert.equal(mediaCheck({ ...probe, format: { duration: '265' } }, 262.91).valid, false);
+  assert.equal(mediaCheck({ ...probe, streams: [probe.streams[0], { ...probe.streams[1], duration: '260' }] }, 262.91).valid, false);
+  assert.equal(mediaCheck({ ...probe, streams: [probe.streams[0], { ...probe.streams[1], start_time: '1.5' }] }, 262.91).valid, false);
 });
 test('real off-keyframe media cut writes video, subtitles and note once', async () => {
   const testRoot = path.join(root, 'tests/export-sandbox'); await fs.mkdir(testRoot, { recursive: true });
@@ -96,6 +114,18 @@ test('real off-keyframe media cut writes video, subtitles and note once', async 
   const collision = await exportClip({ ...task, noteName: '同名笔记' }, config, localRunner);
   assert.match(collision.filename, /^同名笔记 - [a-f0-9]{8}\.md$/);
   assert.equal(await fs.readFile(path.join(config.output, '同名笔记.md'), 'utf8'), '已有笔记不要覆盖');
+  let reached = 0, release;
+  const bothPrepared = new Promise(resolve => { release = resolve; });
+  const concurrentRunner = async (...args) => {
+    if (args[1].includes('-progress')) { if (++reached === 2) release(); await bothPrepared; }
+    return localRunner(...args);
+  };
+  const together = await Promise.all([1, 2].map(offset => exportClip({ ...task, cid: task.cid + offset, noteName: '并发同名笔记' }, config, concurrentRunner)));
+  assert.notEqual(together[0].notePath, together[1].notePath);
+  for (const item of together) {
+    assert.match(await fs.readFile(item.notePath, 'utf8'), new RegExp(item.key));
+    assert.equal(new URL(item.obsidianUri).searchParams.get('path'), item.notePath);
+  }
   const invalidConfig = { ...config, output: path.join(testRoot, 'outside-vault') };
   await assert.rejects(exportClip(task, invalidConfig, localRunner), /不在配置的仓库内/);
   await assert.rejects(exportClip({ ...task, start: 6, end: 7 }, config, localRunner), /没有字幕/);

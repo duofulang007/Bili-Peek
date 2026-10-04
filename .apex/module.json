@@ -5,7 +5,7 @@
   "projectName": "Bili-Peek",
   "projectDescription": "一键启停 B站双图与 Obsidian 片段助手；后台运行，不自动打开网页。",
   "name": "Bili-Peek 与片段助手",
-  "version": "0.3.28",
+  "version": "0.3.38",
   "projectRoot": ".",
   "requiresAdmin": false,
   "singleInstance": true,

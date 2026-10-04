@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bili-Peek · 弹幕观看助手
 // @namespace    bili-peek
-// @version      0.3.28
+// @version      0.3.39
 // @description  视频右侧双图：弹幕词云与可点击跳转的密度图，推荐视频保留在下方。
 // @match        https://www.bilibili.com/video/*
 // @match        https://www.bilibili.com/
@@ -38,6 +38,13 @@
     return total >= 3600
       ? `${Math.floor(total / 3600)}:${String(m).padStart(2, '0')}:${s}`
       : `${Math.floor(total / 60)}:${s}`;
+  }
+
+  function overallProgress(stage, percent, segmented, previous = 0) {
+    const ranges = { prepare: [1, 0], source: [3, 0], download: [5, 75], media: segmented ? [80, 12] : [5, 87], probe: [92, 0], verify: [94, 5], write: [99, 0], complete: [100, 0] };
+    const [start, span] = ranges[stage] || [previous, 0];
+    const fraction = Number.isFinite(percent) ? Math.min(100, Math.max(0, percent)) / 100 : 0;
+    return Math.max(previous, Math.round(start + span * fraction));
   }
 
   function routeKey(url) {
@@ -194,15 +201,16 @@
   function density(records, duration, term = '') {
     const normalizedTerm = term ? normalize(term) : '';
     const width = Math.max(1, Math.ceil(duration / 160));
-    const bins = Array.from({ length: Math.max(1, Math.ceil(duration / width)) }, (_, i) => ({ time: i * width, count: 0, selected: 0, samples: [] }));
+    const bins = Array.from({ length: Math.max(1, Math.ceil(duration / width)) }, (_, i) => ({ time: i * width, count: 0, selected: 0, samples: [], pool: [] }));
     for (const record of records) {
       if (record.time < 0 || record.time > duration) continue;
       const bin = bins[Math.min(bins.length - 1, Math.floor(record.time / width))];
       bin.count++;
       const matches = !normalizedTerm || normalize(record.text).includes(normalizedTerm);
       if (normalizedTerm && matches) bin.selected++;
-      if (matches && record.mode <= 6 && bin.samples.length < 3 && !bin.samples.includes(record.text)) bin.samples.push(record.text);
+      if (matches && record.mode <= 6 && !bin.pool.includes(record.text) && bin.pool.length < 20) bin.pool.push(record.text);
     }
+    for (const bin of bins) bin.samples = bin.pool.slice(0, 3);
     return { bins, width };
   }
 
@@ -322,20 +330,16 @@
     return null;
   }
 
-  function currentQuality() {
-    const label = document.querySelector('.bpx-player-ctrl-quality-result, .bilibili-player-video-quality-menu .bilibili-player-video-quality-menu-text');
-    const selected = qualityFromLabel(label?.textContent);
-    if (selected) return selected;
-    try {
-      const pageWindow = typeof unsafeWindow === 'undefined' ? window : unsafeWindow;
-      const quality = Number(pageWindow.player?.getQuality?.());
-      if ([16, 32, 64, 74, 80, 112, 116, 120, 125, 126, 127].includes(quality)) return quality;
-    } catch {}
-    throw new Error('无法读取当前播放画质，请先在播放器中选择明确画质后再保存');
+  function downloadQualities(data) {
+    if (!data?.dash?.audio?.some(selectMediaUrl)) return [];
+    const labels = { 16: '360P', 32: '480P', 64: '720P', 74: '720P 60帧', 80: '1080P', 112: '1080P 高码率', 116: '1080P 60帧', 120: '4K', 125: 'HDR', 126: '杜比视界', 127: '8K' };
+    return [...new Set((data.dash.video || []).filter(stream => selectMediaUrl(stream) && Number.isInteger(stream.id) && stream.id > 0).map(stream => stream.id))]
+      .sort((a, b) => b - a).map(id => ({ id, label: data.support_formats?.find(format => format.quality === id)?.new_description || labels[id] || `画质 ${id}` }));
   }
+  function defaultDownloadQuality(qualities) { return qualities.find(item => item.id === 80)?.id || qualities[0]?.id; }
 
   if (typeof document === 'undefined') {
-    if (typeof module !== 'undefined') module.exports = { formatTime, routeKey, seekMedia, decodeDanmaku, density, wordStats, parsePageState, mergeWatchRanges, watchedAdvance, qualityFromLabel, selectQualityStream, selectMediaUrl };
+    if (typeof module !== 'undefined') module.exports = { formatTime, overallProgress, routeKey, seekMedia, decodeDanmaku, density, wordStats, parsePageState, mergeWatchRanges, watchedAdvance, qualityFromLabel, selectQualityStream, selectMediaUrl, downloadQualities, defaultDownloadQuality };
     return;
   }
   if (window.top !== window.self || document.getElementById(HOST_ID)) return;
@@ -347,7 +351,8 @@
   let watchRoute = null, watchRanges = [], watchSample = null, watchStart = null, watchDirty = false, watchSavedAt = 0;
   let seekNoticeTimer, openNoteTimer;
   const exportDrafts = new Map();
-  let clipRange = null, rangeDrag = null, exportingRoute = null;
+  let clipRange = null, rangeDrag = null;
+  const exportingRoutes = new Set(), transferStates = new Map();
   let helperOnline = false, helperFailures = 0, helperTimer, helperSync = 0, pageSuspended = false;
   const savedValue = (key, fallback) => typeof GM_getValue === 'function' ? GM_getValue(key, fallback) : fallback;
   const managed = () => Boolean(savedValue('export-token', ''));
@@ -362,9 +367,9 @@
   const SVG = 'http://www.w3.org/2000/svg';
   const styles = `
     :host{display:block;pointer-events:auto;width:100%;min-width:0;margin:0 0 18px;color-scheme:light;
-      --bg:#fff;--text:#18191c;--muted:#61666d;--line:#e3e5e7;--accent:#5287d5;--fill:#5287d540;
+      --bg:#fff;--text:#18191c;--muted:#61666d;--line:#e3e5e7;--accent:#5287d5;--fill:#5287d540;--shadow:#00000024;
       color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',sans-serif}
-    :host([data-theme=dark]){color-scheme:dark;--bg:#18191b;--text:#eceef0;--muted:#a6a9af;--line:#36383c;--accent:#829eed;--fill:#6e8be96b}
+    :host([data-theme=dark]){color-scheme:dark;--bg:#18191b;--text:#eceef0;--muted:#a6a9af;--line:#36383c;--accent:#829eed;--fill:#6e8be96b;--shadow:#0009}
     :host([hidden]),[hidden]{display:none!important}*{box-sizing:border-box}
     figure{position:relative;display:flex;flex-direction:column;height:var(--card-height,292px);background:var(--bg);margin:0 0 20px;padding:12px 10px 8px;border:1px solid var(--line);border-radius:6px}
     figure:last-of-type{margin-bottom:0}figcaption{flex:none}
@@ -380,11 +385,14 @@
     .grid{stroke:var(--line);stroke-width:.7}.axis{fill:var(--muted);font-size:10px}.area{fill:var(--fill)}.curve{stroke:var(--accent);fill:none;stroke-width:1.8}
     .match{stroke:#eab66b;fill:none;stroke-width:2}.playhead{stroke:var(--text);stroke-dasharray:3 3;stroke-width:1}.hover{stroke:var(--muted);stroke-dasharray:2 3}
     .empty{position:absolute;inset:48px 12px 25px;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;color:var(--muted);font-size:13px;text-align:center}
-    #tooltip{position:absolute;z-index:2;max-width:calc(100% - 24px);padding:9px 11px;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--text);font-size:12px;box-shadow:0 3px 12px #0002;pointer-events:none;white-space:pre-line;overflow-wrap:anywhere}
+    .timeline-info{position:absolute;left:2px;right:2px;bottom:calc(100% + 6px);display:flex;align-items:flex-end;justify-content:center;z-index:2;pointer-events:none}
+    #tooltip{max-width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);box-shadow:0 6px 20px var(--shadow);color:var(--text);font-size:12px;line-height:18px;overflow-wrap:anywhere;pointer-events:none}
+    #tooltip .detail-title{font-weight:600;font-variant-numeric:tabular-nums;margin-bottom:2px}
+    #tooltip .detail-sample{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
     #status{position:absolute;bottom:12px;left:12px;right:12px;font-size:11px;color:var(--muted);pointer-events:none;background:var(--bg)}
     #status[data-error=true]{color:#df7180}#clear{margin-left:auto}#mode{display:flex;align-items:center;gap:4px;margin-left:auto;flex:none}#mode button{font-size:11px;padding:4px 6px;white-space:nowrap}#mode button[aria-pressed=true]{color:var(--accent);border-color:var(--accent);background:var(--fill)}
     #timeline #status{position:static;flex:none;min-height:0;margin-top:3px;line-height:1.4;pointer-events:auto}
-    #timeline:has(#open-note:not([hidden])) #status{padding-right:30px;min-height:28px}#timeline #open-note{position:absolute;bottom:8px;right:10px}
+    #timeline #open-note{display:flex;align-items:center;gap:5px;width:auto;height:28px;flex:none;margin:0;padding:4px 7px;white-space:nowrap;font-size:12px;line-height:18px}#open-note svg{width:14px;height:14px;flex:none}
     .clip-controls{display:flex;align-items:center;gap:6px;flex:none;margin-top:6px}
     .time-field{display:flex;align-items:center;flex:1;min-width:0;height:32px;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--muted);font-size:12px}
     .time-field input{width:100%;min-width:0;height:30px;border:0;border-radius:3px;background:transparent;color:var(--text);font:13px/1.4 inherit;font-variant-numeric:tabular-nums;text-align:center}
@@ -402,8 +410,10 @@
     #export-dialog{width:min(380px,calc(100vw - 32px));padding:22px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--text);font:14px/1.5 inherit;box-shadow:0 16px 50px #0004}
     #export-dialog::backdrop{background:#0007}#export-dialog h2{margin:0 0 18px;font-size:18px}
     #export-dialog label{display:block;margin-top:14px}#export-dialog small{color:var(--muted);font-size:12px}
-    #export-dialog input,#export-dialog textarea{display:block;width:100%;margin-top:6px;padding:9px 10px;border:1px solid var(--line);border-radius:5px;background:var(--bg);color:var(--text);font:inherit}
+    #export-dialog input,#export-dialog textarea,#export-dialog select{display:block;width:100%;margin-top:6px;padding:9px 10px;border:1px solid var(--line);border-radius:5px;background:var(--bg);color:var(--text);font:inherit}
+    #export-dialog select{max-width:none;margin-left:0}
     #export-dialog textarea{resize:vertical;min-height:80px}#export-dialog .dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:20px}
+    #export-transfer{flex:none;margin-top:5px}#export-transfer[hidden]{display:none}#export-transfer progress{display:block;width:100%;height:5px;accent-color:var(--accent)}.transfer-row{display:flex;align-items:center;gap:6px;margin-top:4px;font-size:11px;color:var(--muted)}#transfer-detail{flex:1;min-width:0}#export-transfer button{padding:4px 8px;min-height:28px;font-size:12px}
     #export-dialog button{padding:8px 16px}#export-confirm{color:var(--accent);border-color:var(--accent);background:var(--fill)}
     #watch-track{position:absolute;left:10%;right:3.75%;height:12px;pointer-events:none;z-index:1}
     .watch-segment{position:absolute;top:0;height:12px;min-width:3px;pointer-events:auto;outline:none;cursor:help}
@@ -432,7 +442,7 @@
   function createPanel() {
     host = document.createElement('div');
     host.id = HOST_ID;
-    host.dataset.version = '0.3.28';
+    host.dataset.version = '0.3.39';
     // Bilibili / other scripts can disable hit testing on the whole right rail.
     // Override inheritance only on our panel, never re-enable native controls.
     host.style.setProperty('pointer-events', 'auto', 'important');
@@ -440,14 +450,15 @@
     shadow.addEventListener('click', () => { diagnostic.clicks++; }, { capture: true, passive: true });
     shadow.addEventListener('pointermove', () => { diagnostic.moves++; }, { capture: true, passive: true });
     shadow.innerHTML = `<style>${styles}</style>
-      <figure aria-label="弹幕词云"><figcaption>弹幕词云<button id="clear" hidden title="清除词语筛选">清除</button><div id="mode" role="group" aria-label="词云模式"><button id="mode-words" type="button" aria-pressed="true" title="按词语出现的弹幕条数排序">高频词</button><button id="mode-phrases" type="button" aria-pressed="false" title="查看重复出现的短语">重复短语</button></div></figcaption>
+      <figure aria-label="弹幕词云"><figcaption id="cloud-caption">弹幕词云<button id="clear" hidden title="清除词语筛选">清除</button><div id="mode" role="group" aria-label="词云模式"><button id="mode-words" type="button" aria-pressed="true" title="按词语出现的弹幕条数排序">高频词</button><button id="mode-phrases" type="button" aria-pressed="false" title="查看重复出现的短语">重复短语</button></div></figcaption>
         <div id="cloud-note"></div><svg id="cloud" viewBox="0 0 320 230" role="group" aria-label="点击词语查看出现时段"></svg><div id="cloud-empty" class="empty">正在加载弹幕…</div></figure>
-      <figure id="timeline" aria-label="弹幕密度图"><figcaption>弹幕密度</figcaption>
+      <figure id="timeline" aria-label="弹幕密度图"><div class="timeline-info"><div id="tooltip" hidden></div></div>
         <div class="density-wrap"><div id="watch-track" aria-label="已观看区间" hidden></div><span id="watch-start" hidden></span><span id="seek-status" role="status" aria-live="polite"></span><svg id="density" viewBox="0 0 320 220" preserveAspectRatio="none" role="button" tabindex="0" aria-label="弹幕密度，点击位置跳转，左右键选择时间，回车跳转"></svg>
         <div id="range-track" aria-label="在密度图中拖动选择截取时段"><div id="range-window" class="range-window" tabindex="0" role="group" aria-label="移动整个选区，左右键平移"></div><div id="range-start" class="range-handle" tabindex="0" role="slider" aria-label="截取起点" aria-orientation="horizontal"></div><div id="range-end" class="range-handle" tabindex="0" role="slider" aria-label="截取终点" aria-orientation="horizontal"></div></div></div>
         <div class="clip-controls"><div class="time-field"><button id="jump-start" class="clip-jump" type="button" aria-label="跳转到填写的开始时间" title="跳转到开始时间" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 9c0 5-7 12-7 12S5 14 5 9a7 7 0 1 1 14 0Z"/><circle cx="12" cy="9" r="2.5"/><path d="M5 18c-2 1-3 2-3 3 0 2 4.5 3 10 3s10-1 10-3c0-1-1-2-3-3" transform="translate(2 2) scale(.8333)"/></svg></button><input id="clip-start" type="text" inputmode="numeric" aria-label="截取开始时间" aria-describedby="status" placeholder="00:00" title="分:秒或时:分:秒" disabled></div><output id="clip-duration" aria-label="截取总时长" title="截取总时长">—</output><div class="time-field"><input id="clip-end" type="text" inputmode="numeric" aria-label="截取结束时间" aria-describedby="status" placeholder="00:00" title="分:秒或时:分:秒" disabled><button id="jump-end" class="clip-jump" type="button" aria-label="跳转到填写的结束时间" title="跳转到结束时间" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 9c0 5-7 12-7 12S5 14 5 9a7 7 0 1 1 14 0Z"/><circle cx="12" cy="9" r="2.5"/><path d="M5 18c-2 1-3 2-3 3 0 2 4.5 3 10 3s10-1 10-3c0-1-1-2-3-3" transform="translate(2 2) scale(.8333)"/></svg></button></div><button id="save-clip" type="button" aria-label="保存选区草稿" title="保存选区草稿（尚未接通音视频导出）" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h12l4 4v12a2 2 0 0 1-2 2Z"/><path d="M7 3v6h10V3M7 21v-8h10v8"/></svg></button></div>
-        <div id="density-empty" class="empty">正在加载弹幕…</div><div id="tooltip" hidden></div><div id="status" role="status" aria-live="polite"></div><a id="open-note" hidden aria-label="打开保存的 Obsidian 笔记" title="打开笔记"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M14 3h7v7M21 3l-11 11M10 3H3v18h18v-7"/></svg></a></figure>`;
-    ui = Object.fromEntries(['cloud', 'cloud-note', 'mode', 'mode-words', 'mode-phrases', 'clear', 'density', 'cloud-empty', 'density-empty', 'tooltip', 'timeline', 'status', 'open-note', 'range-track', 'range-window', 'range-start', 'range-end', 'clip-start', 'clip-end', 'clip-duration', 'watch-track', 'watch-start', 'seek-status', 'jump-start', 'jump-end', 'save-clip'].map(id => [id, shadow.getElementById(id)]));
+        <div id="density-empty" class="empty">正在加载弹幕…</div><div id="export-transfer" hidden><progress id="transfer-progress" max="100" aria-label="当前保存阶段进度"></progress><div class="transfer-row"><span id="transfer-detail"></span><a id="open-note" hidden aria-label="打开保存的 Obsidian 笔记" title="打开笔记"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M14 3h7v7M21 3l-11 11M10 3H3v18h18v-7"/></svg><span>打开笔记</span></a><button id="transfer-pause" type="button" hidden>暂停</button><button id="transfer-cancel" type="button">取消</button></div></div><div id="status" role="status" aria-live="polite"></div></figure>`;
+    ui = Object.fromEntries(['cloud', 'cloud-caption', 'cloud-note', 'mode', 'mode-words', 'mode-phrases', 'clear', 'density', 'cloud-empty', 'density-empty', 'tooltip', 'timeline', 'status', 'open-note', 'range-track', 'range-window', 'range-start', 'range-end', 'clip-start', 'clip-end', 'clip-duration', 'watch-track', 'watch-start', 'seek-status', 'jump-start', 'jump-end', 'save-clip'].map(id => [id, shadow.getElementById(id)]));
+    for (const id of ['export-transfer', 'transfer-progress', 'transfer-detail', 'transfer-pause', 'transfer-cancel']) ui[id] = shadow.getElementById(id);
     bindClipControls();
     for (const [id, phrases] of [['mode-words', false], ['mode-phrases', true]]) {
       ui[id].addEventListener('click', () => {
@@ -483,10 +494,30 @@
     return parts.reduce((total, part) => total * 60 + Number(part), 0);
   }
 
+  function showTransfer(route, patch) {
+    const state = { ...transferStates.get(route), ...patch };
+    transferStates.set(route, state);
+    if (transferStates.size > 100) { const ended = [...transferStates.keys()].find(key => !exportingRoutes.has(key) && key !== currentRoute); if (ended) transferStates.delete(ended); }
+    if (route !== currentRoute || !ui) return;
+    ui['export-transfer'].hidden = false;
+    ui['transfer-progress'].value = state.value || 0;
+    ui['transfer-progress'].setAttribute('aria-label', '整体保存进度');
+    ui['transfer-detail'].textContent = state.text || '';
+    ui['transfer-detail'].style.color = state.error ? 'var(--danger, #ef6674)' : '';
+    ui['transfer-pause'].hidden = !state.canPause;
+    ui['transfer-pause'].textContent = state.paused ? '继续' : '暂停';
+    ui['transfer-pause'].onclick = state.pause || null;
+    ui['transfer-cancel'].hidden = Boolean(state.finished);
+    ui['transfer-cancel'].disabled = !state.cancel || Boolean(state.cannotCancel);
+    ui['transfer-cancel'].onclick = state.cancel || null;
+  }
+
   function updateClipUI(syncInputs = true) {
     const enabled = Boolean(chartData && clipRange && videoDuration >= 1 && currentRoute === routeKey(location.href));
-    for (const id of ['clip-start', 'clip-end', 'save-clip']) ui[id].disabled = !enabled || (id === 'save-clip' && Boolean(exportingRoute));
-    ui['save-clip'].setAttribute('aria-busy', String(Boolean(exportingRoute)));
+    for (const id of ['clip-start', 'clip-end', 'save-clip']) ui[id].disabled = !enabled || (id === 'save-clip' && exportingRoutes.has(currentRoute));
+    ui['save-clip'].setAttribute('aria-busy', String(exportingRoutes.has(currentRoute)));
+    if (transferStates.has(currentRoute)) showTransfer(currentRoute, {});
+    else ui['export-transfer'].hidden = true;
     ui['range-track'].hidden = !enabled;
     if (!enabled) { ui['seek-status'].textContent = ''; ui['clip-duration'].textContent = '—'; ui['jump-start'].disabled = true; ui['jump-end'].disabled = true; return; }
     ui['range-track'].style.top = 22 / chartData.height * 100 + '%';
@@ -533,7 +564,7 @@
     const endValid = Number.isFinite(end) && end <= Math.floor(videoDuration) && end > start;
     ui['clip-start'].setAttribute('aria-invalid', String(!startValid));
     ui['clip-end'].setAttribute('aria-invalid', String(!endValid));
-    ui['save-clip'].disabled = !startValid || !endValid || Boolean(exportingRoute);
+    ui['save-clip'].disabled = !startValid || !endValid || exportingRoutes.has(currentRoute);
     updateClipDuration();
     if (!startValid || !endValid) { status(`请输入有效起止时间（分:秒或时:分:秒），结束须晚于开始且不超过 ${formatTime(videoDuration)}。`, true); return false; }
     clipRange = { start, end }; updateClipUI(); status(''); return true;
@@ -605,32 +636,49 @@
     ui['save-clip'].title = '保存视频片段和字幕到 Obsidian';
     ui['save-clip'].setAttribute('aria-label', '保存视频片段和字幕到 Obsidian');
     ui['save-clip'].addEventListener('click', async () => {
-      if (exportingRoute) return;
+      if (exportingRoutes.has(currentRoute)) return;
       if (currentRoute !== routeKey(location.href) || !commitClipInputs()) return;
       const taskRoute = currentRoute, range = { ...clipRange };
-      exportingRoute = taskRoute; updateClipUI();
+      exportingRoutes.add(taskRoute); updateClipUI();
       try {
         const draftKey = `${taskRoute}:${range.start}:${range.end}`;
-        const metadata = await askExportMetadata(draftKey, range);
+        const token = savedValue('export-token', '');
+        let health;
+        if (token) { try { health = await helperRequest('/health', token, undefined, 2000); } catch {} }
+        let exportMedia;
+        if (token && health?.ready) { status('正在读取可下载画质…'); exportMedia = await loadExportMedia(taskRoute, token); }
+        if (taskRoute !== currentRoute || taskRoute !== routeKey(location.href)) return;
+        status('');
+        const metadata = await askExportMetadata(draftKey, range, Boolean(health?.segmentAvailable), exportMedia?.qualities);
         if (!metadata) return;
         if (taskRoute !== currentRoute || taskRoute !== routeKey(location.href)) { status('视频已切换，请重新选择片段后保存。', true); return; }
         if (typeof GM_getValue !== 'function' || typeof GM_setValue !== 'function') throw new Error('请在油猴中更新脚本权限后保存。');
-        const token = GM_getValue('export-token', '');
         if (token) {
-          exportingRoute = taskRoute; updateClipUI();
-          const report = (message, error = false) => { if (currentRoute === taskRoute) status(message, error); };
+          updateClipUI();
+          let overall = 0;
+          const report = (message, error = false, finished = false) => {
+            showTransfer(taskRoute, { value: overall, text: message, error, canPause: false, finished, cannotCancel: true });
+            if (currentRoute === taskRoute) status('');
+          };
           report('正在连接本地助手…');
           await helperRequest('/health', token, undefined, 2000);
           report('正在读取当前分 P 的视频和字幕…');
-          const payload = await prepareExport(taskRoute, range, token);
+          const payload = await prepareExport(taskRoute, range, token, metadata.downloadQuality, exportMedia);
           Object.assign(payload, metadata);
           const job = await helperRequest('/clips', token, payload);
-          report('正在裁剪视频并保存字幕，请稍候…');
-          const deadline = Date.now() + 660000;
-          while (Date.now() < deadline) {
+          let paused = false;
+          const action = async (name, button) => {
+            button.disabled = true;
+            try { const changed = await helperRequest(`/jobs/${job.key}/${name}`, token, {}); paused = changed.paused; }
+            catch (error) { report(error.message, true); }
+            finally { button.disabled = false; }
+          };
+          report('任务已提交，正在准备保存…');
+          while (true) {
             const result = await helperRequest(`/jobs/${job.key}`, token);
             if (result.state === 'complete') {
-              report(result.hasSubtitles === false ? '视频和笔记已保存到 Obsidian，未保存字幕。' : '视频、字幕和笔记已保存到 Obsidian。');
+              overall = 100;
+              report(result.hasSubtitles === false ? '视频和笔记已保存到 Obsidian，未保存字幕。' : '视频、字幕和笔记已保存到 Obsidian。', false, true);
               exportDrafts.delete(draftKey);
               if (typeof result.obsidianUri === 'string' && /^obsidian:\/\/open\?path=/.test(result.obsidianUri) && currentRoute === taskRoute) {
                 clearTimeout(openNoteTimer); ui['open-note'].href = result.obsidianUri; ui['open-note'].hidden = false;
@@ -639,37 +687,50 @@
               return;
             }
             if (result.state === 'failed') throw new Error(result.error);
+            if (result.state === 'cancelled') { report(metadata.downloadEngine === 'nre' ? '保存已取消；下载缓存已保留，可重试。' : '保存已取消，可重试。', false, true); return; }
             if (result.state === 'missing') throw new Error('助手已重启，任务状态丢失，请重试');
             if (result.stage) {
-              const label = { prepare: '正在准备保存', media: '正在下载并裁剪视频', probe: '正在检查音视频时长', verify: '正在检查视频完整性', write: '正在写入 Obsidian', complete: '正在完成保存' }[result.stage] || '正在保存';
-              report(`保存中${Number.isFinite(result.percent) ? ` · ${result.percent}%` : ''}`);
-              ui.status.title = `${label}${Number.isFinite(result.elapsedSeconds) ? ` · 已用 ${result.elapsedSeconds} 秒` : ''}`;
+              const label = { queued: `等待保存${result.queuePosition ? ` · 第 ${result.queuePosition} 个` : ''}`, prepare: '准备保存', source: '选择下载来源', download: '下载视频', media: metadata.downloadEngine === 'nre' ? '裁剪视频' : '下载并裁剪', probe: '检查时长', verify: '检查完整性', write: '写入 Obsidian', complete: '完成保存' }[result.stage] || '保存中';
+              paused = Boolean(result.paused);
+                overall = overallProgress(result.stage, result.percent, metadata.downloadEngine === 'nre', overall);
+                const size = bytes => `${(bytes / 1048576).toFixed(1)} MB`;
+                let text = result.stage === 'download' && Number.isFinite(result.totalBytes)
+                  ? `${paused ? '已暂停' : '下载'} · ${size(result.downloadedBytes)} / ${size(result.totalBytes)} · ${size(result.bytesPerSecond || 0)}/s${Number.isFinite(result.etaSeconds) ? ` · 约 ${result.etaSeconds} 秒` : ''}`
+                  : label;
+                text += `${Number.isFinite(result.elapsedSeconds) ? ` · 已用 ${result.elapsedSeconds} 秒` : ''}`;
+                showTransfer(taskRoute, { value: overall, text, canPause: result.canPause, paused, pause: () => action(paused ? 'resume' : 'pause', ui['transfer-pause']), cancel: () => action('cancel', ui['transfer-cancel']), cannotCancel: result.stage === 'write' || result.stage === 'complete', finished: false });
             }
             await new Promise(resolve => setTimeout(resolve, 1200));
           }
-          throw new Error('等待超时，请查看本地助手后重试');
         }
-        const previous = GM_getValue('clip-drafts', []);
-        const draft = { route: taskRoute, start: range.start, end: range.end, title: document.title, ...metadata, created: new Date().toISOString() };
-        const drafts = Array.isArray(previous) ? previous : [];
-        const key = item => `${item.route}:${item.start}:${item.end}`;
-        GM_setValue('clip-drafts', [...drafts.filter(item => key(item) !== key(draft)), draft].slice(-100));
-        status(`选区 ${formatTime(draft.start)}–${formatTime(draft.end)} 已保存为本地草稿；请先用油猴菜单配对本地助手，尚未导出视频。`);
-      } catch (error) { if (currentRoute === taskRoute) status(`保存失败：${error.message}`, true); }
-      finally { exportingRoute = null; updateClipUI(); }
+        status(`选区 ${formatTime(range.start)}–${formatTime(range.end)} 已保存为本地草稿；请先用油猴菜单配对本地助手，尚未导出视频。`);
+      } catch (error) {
+        if (transferStates.has(taskRoute)) {
+          showTransfer(taskRoute, { text: `保存失败：${error.message}`, error: true, finished: true, canPause: false });
+          if (currentRoute === taskRoute) status('');
+        } else if (currentRoute === taskRoute) status(`保存失败：${error.message}`, true);
+      }
+      finally { exportingRoutes.delete(taskRoute); updateClipUI(); }
     });
     updateClipUI();
   }
 
-  function askExportMetadata(draftKey, range) {
+  function askExportMetadata(draftKey, range, segmentAvailable = false, qualities = []) {
     return new Promise(resolve => {
       const dialog = document.createElement('dialog'); dialog.id = 'export-dialog';
       dialog.innerHTML = `<form><h2>保存片段</h2><label>笔记名称<input id="export-name" maxlength="80" required></label><label>标签 <small>必填，用逗号分隔</small><input id="export-tags" placeholder="例如：学习/编程，待整理" required></label><label>摘要 <small>选填</small><textarea id="export-summary" maxlength="2000" placeholder="简单描述这段内容，也可以留空"></textarea></label><div class="dialog-actions"><button id="export-cancel" type="button">取消</button><button id="export-confirm" type="submit">保存</button></div></form>`;
       const name = dialog.querySelector('#export-name'), tags = dialog.querySelector('#export-tags');
       name.value = document.title.replace(/[_-]哔哩哔哩.*$/, '').trim().slice(0, 80) || '视频片段';
       const summary = dialog.querySelector('#export-summary');
+      const qualityLabel = document.createElement('label'); qualityLabel.textContent = '下载画质';
+      const quality = document.createElement('select'); quality.id = 'export-quality'; qualityLabel.append(quality);
+      if (qualities.length) {
+        for (const item of qualities) { const option = document.createElement('option'); option.value = String(item.id); option.textContent = item.label; quality.append(option); }
+        quality.value = String(defaultDownloadQuality(qualities));
+      } else { const option = document.createElement('option'); option.textContent = '连接助手后读取'; quality.append(option); quality.disabled = true; }
+      name.parentElement.after(qualityLabel);
       const saved = exportDrafts.get(draftKey);
-      if (saved) { name.value = saved.noteName; tags.value = saved.tagText; summary.value = saved.summary; }
+      if (saved) { name.value = saved.noteName; tags.value = saved.tagText; summary.value = saved.summary; if (qualities.some(item => item.id === saved.downloadQuality)) quality.value = String(saved.downloadQuality); }
       const context = document.createElement('p'); context.className = 'clip-summary';
       context.textContent = `${formatTime(range.start)}–${formatTime(range.end)} · ${Math.round(range.end - range.start)} 秒`;
       dialog.querySelector('h2').after(context);
@@ -683,7 +744,7 @@
           tags.setCustomValidity(''); tags.focus();
         }); recent.append(button);
       }
-      const remember = () => exportDrafts.set(draftKey, { noteName: name.value, tagText: tags.value, summary: summary.value });
+      const remember = () => exportDrafts.set(draftKey, { noteName: name.value, tagText: tags.value, summary: summary.value, downloadQuality: quality.disabled ? undefined : Number(quality.value) });
       dialog.addEventListener('input', remember);
       const finish = value => { dialog.close(); dialog.remove(); resolve(value); };
       dialog.addEventListener('cancel', event => { event.preventDefault(); finish(null); });
@@ -697,7 +758,7 @@
         }
         remember();
         GM_setValue('recent-export-tags', [...new Set([...parsed, ...(Array.isArray(recentTags) ? recentTags : [])])].slice(0, 12));
-        finish({ noteName: name.value.trim(), tags: parsed, summary: summary.value.trim() });
+        finish({ noteName: name.value.trim(), tags: parsed, summary: summary.value.trim(), ...(quality.disabled ? {} : { downloadQuality: Number(quality.value) }), ...(segmentAvailable ? { downloadEngine: 'nre' } : {}) });
       });
       host.shadowRoot.append(dialog); dialog.showModal(); name.focus(); name.select();
     });
@@ -754,14 +815,31 @@
     document.body.append(notice); setTimeout(() => notice.remove(), 8000);
   }
 
-  async function prepareExport(key, range, token) {
-    const quality = currentQuality();
+  async function loadExportMedia(key, token, requestedQuality = 127) {
     const [id, partText] = key.split(':p'), part = Number(partText);
     const controller = new AbortController();
     const identity = /^av/i.test(id) ? `aid=${id.slice(2)}` : `bvid=${id}`;
     const info = await request(`https://api.bilibili.com/x/web-interface/view?${identity}`, false, controller.signal);
     const page = info.data?.pages?.find(item => item.page === part);
-    if (info.code !== 0 || !page?.cid || range.end > page.duration) throw new Error('无法确认视频或选区超出当前分 P');
+    if (info.code !== 0 || !page?.cid) throw new Error('无法确认当前视频或分 P');
+    const nav = await request('https://api.bilibili.com/x/web-interface/nav', false, controller.signal);
+    const wbi = nav.data?.wbi_img;
+    if (!wbi?.img_url || !wbi?.sub_url) throw new Error('无法读取视频接口签名信息');
+    const filename = url => new URL(url).pathname.split('/').at(-1).split('.')[0];
+    const signed = await helperRequest('/sign-wbi', token, { key: filename(wbi.img_url) + filename(wbi.sub_url), params: { ...(/^av/i.test(id) ? { aid: id.slice(2) } : { bvid: id }), cid: page.cid, qn: requestedQuality, fnval: 4048, fourk: 1 } });
+    const streams = await request(`https://api.bilibili.com/x/player/wbi/playurl?${signed.query}`, false, controller.signal);
+    const qualities = streams.code === 0 ? downloadQualities(streams.data) : [];
+    if (!qualities.length) throw new Error('未取得可下载的音视频画质，请确认登录与权限后重试');
+    return { id, part, page, info, dash: streams.data.dash, qualities };
+  }
+
+  async function prepareExport(key, range, token, requestedQuality, mediaSnapshot) {
+    const media = mediaSnapshot || await loadExportMedia(key, token, requestedQuality || 127);
+    const quality = requestedQuality || defaultDownloadQuality(media.qualities);
+    const { id, part, page, info, dash } = media;
+    if (key !== `${id}:p${part}` || range.end > page.duration) throw new Error('无法确认视频或选区超出当前分 P');
+    const controller = new AbortController();
+    const identity = /^av/i.test(id) ? `aid=${id.slice(2)}` : `bvid=${id}`;
     const query = `${identity}&cid=${page.cid}`;
     let text = { body: [] };
     const player = await request(`https://api.bilibili.com/x/player/wbi/v2?${query}`, false, controller.signal).catch(() => null);
@@ -777,19 +855,14 @@
     if (!cues.length) {
       text = { body: [] };
     }
-    const nav = await request('https://api.bilibili.com/x/web-interface/nav', false, controller.signal);
-    const wbi = nav.data?.wbi_img;
-    if (!wbi?.img_url || !wbi?.sub_url) throw new Error('无法读取视频接口签名信息');
-    const filename = url => new URL(url).pathname.split('/').at(-1).split('.')[0];
-    const signed = await helperRequest('/sign-wbi', token, { key: filename(wbi.img_url) + filename(wbi.sub_url), params: { ...(/^av/i.test(id) ? { aid: id.slice(2) } : { bvid: id }), cid: page.cid, qn: quality, fnval: 4048, fourk: 1 } });
-    const streams = await request(`https://api.bilibili.com/x/player/wbi/playurl?${signed.query}`, false, controller.signal);
-    const dash = streams.data?.dash;
-    const video = selectQualityStream(dash?.video, quality);
-    const audio = dash?.audio?.slice().sort((a, b) => b.bandwidth - a.bandwidth)[0];
-    if (streams.code !== 0 || !video || !audio) throw new Error('未取得当前所选画质的音视频轨道，请确认登录与画质权限后重试');
+    const video = selectQualityStream(dash?.video?.filter(selectMediaUrl), quality);
+    const audio = dash?.audio?.filter(selectMediaUrl).sort((a, b) => b.bandwidth - a.bandwidth)[0];
+    if (!video || !audio) throw new Error('未取得所选下载画质的音视频轨道，请刷新画质列表后重试');
     const videoUrl = selectMediaUrl(video), audioUrl = selectMediaUrl(audio);
     if (!videoUrl || !audioUrl) throw new Error(`未取得可用的${!videoUrl ? '视频' : '音频'}下载地址，请重试；仍失败时请复制排错信息`);
-    return { id, part, cid: page.cid, start: range.start, end: range.end, title: info.data.title, videoUrl, audioUrl, subtitles: text.body, videoOnly: !cues.length };
+    const descriptor = track => { const base = track.SegmentBase || track.segment_base; return base ? { init: base.Initialization || base.initialization, index: base.indexRange || base.index_range, codec: track.codecs } : undefined; };
+    const addresses = track => [...new Set([track.baseUrl, track.base_url, ...(Array.isArray(track.backupUrl) ? track.backupUrl : []), ...(Array.isArray(track.backup_url) ? track.backup_url : [])].filter(url => selectMediaUrl({ baseUrl: url })))].slice(0, 3);
+    return { id, part, cid: page.cid, start: range.start, end: range.end, downloadQuality: quality, title: info.data.title, videoUrl, audioUrl, videoUrls: addresses(video), audioUrls: addresses(audio), videoTrack: descriptor(video), audioTrack: descriptor(audio), subtitles: text.body, videoOnly: !cues.length };
   }
 
   if (typeof GM_registerMenuCommand === 'function' && typeof GM_setValue === 'function') {
@@ -873,7 +946,6 @@
         segment = document.createElement('span'); segment.className = 'watch-segment'; segment.tabIndex = 0;
         const show = () => {
           ui.tooltip.textContent = segment.dataset.details; ui.tooltip.hidden = false;
-          ui.tooltip.style.left = '12px'; ui.tooltip.style.right = '12px'; ui.tooltip.style.top = '28px';
         };
         segment.addEventListener('pointerenter', show); segment.addEventListener('focus', show);
         segment.addEventListener('pointerleave', () => { ui.tooltip.hidden = true; }); segment.addEventListener('blur', () => { ui.tooltip.hidden = true; });
@@ -930,7 +1002,7 @@
       if (count === terms.length) break;
     }
     ui['cloud-note'].textContent += ` · 显示 ${placed} 项`;
-    ui.cloud.previousElementSibling.previousElementSibling.title = ui['cloud-note'].textContent;
+    ui['cloud-caption'].title = ui['cloud-note'].textContent;
     for (const row of rows) {
       let x = 4;
       const gap = row.items.length > 1 ? 12 + Math.min(10, (312 - row.width) / (row.items.length - 1)) : 0;
@@ -995,11 +1067,20 @@
     const index = Math.min(chartData.bins.length - 1, Math.floor(time / chartData.width));
     const bin = chartData.bins[index];
     const end = Math.min(videoDuration, bin.time + chartData.width);
-    ui.tooltip.textContent = `${formatTime(bin.time)}–${formatTime(end)} · ${bin.count} 条${selectedTerm ? `\n「${selectedTerm}」${bin.selected} 条` : ''}${bin.samples.length ? '\n' + bin.samples.map(t => t.slice(0, 48)).join('\n') : ''}\n点击跳转到 ${formatTime(time)}`;
+    const title = document.createElement('div'); title.className = 'detail-title';
+    title.textContent = `${formatTime(bin.time)}–${formatTime(end)} · ${bin.count} 条${selectedTerm ? ` ·「${selectedTerm}」${bin.selected} 条` : ''}`;
+    function pickSamples(term) {
+      const normalized = term ? normalize(term) : '';
+      const pool = normalized ? records.filter(record => record.mode <= 6 && normalize(record.text).includes(normalized)) : records;
+      let target = chartData.bins[index];
+      if (normalized && !pool.some(record => record.time >= bin.time && record.time < bin.time + chartData.width)) target = chartData.bins[index - 1];
+      return target?.samples || [];
+    }
+    const samples = pickSamples(selectedTerm).map(text => {
+      const line = document.createElement('div'); line.className = 'detail-sample'; line.textContent = text; return line;
+    });
+    ui.tooltip.replaceChildren(title, ...samples);
     ui.tooltip.hidden = false;
-    ui.tooltip.style.left = time / videoDuration > .5 ? '12px' : 'auto';
-    ui.tooltip.style.right = time / videoDuration > .5 ? 'auto' : '12px';
-    ui.tooltip.style.top = '40px';
     const xx = 32 + time / videoDuration * 276;
     const line = ui.density.querySelector('.hover');
     line?.setAttribute('x1', xx); line?.setAttribute('x2', xx); line?.setAttribute('visibility', 'visible');

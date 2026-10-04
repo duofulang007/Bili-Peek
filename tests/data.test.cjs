@@ -65,6 +65,24 @@ test('tooltip samples keep three distinct matching originals, including the fina
   assert.deepEqual(density(rows, 160).bins[0].samples, ['ＡＢＣ 内存', '其他', 'abc第二']);
 });
 
+test('tooltip samples stay available for sparse bins and cap at twenty distinct originals',()=>{
+  // The hover detail must not go blank just because a bucket holds few messages.
+  const rows = [
+    { time: 10, text: '稀疏桶唯一一条', mode: 1 },
+    { time: 20, text: '空桶邻居', mode: 1 },
+    ...Array.from({ length: 30 }, (_, i) => ({ time: 30, text: `密集${i}`, mode: 1 })),
+  ];
+  const data = density(rows, 160);
+  assert.deepEqual(data.bins[10].samples, ['稀疏桶唯一一条']);
+  assert.deepEqual(data.bins[11].samples, []);
+  assert.equal(data.bins[30].pool.length, 20, '池上限 20，避免为悬停保留过多文本');
+  assert.equal(data.bins[30].samples.length, 3, '悬停只展示前三条，且不破坏原有断言口径');
+  assert.deepEqual(data.bins[30].samples, ['密集0', '密集1', '密集2']);
+  // Duplicate text must not consume pool slots twice.
+  const repeated = density([{ time: 0, text: '重复', mode: 1 }, { time: 0, text: '重复', mode: 1 }, { time: 0, text: '另一条', mode: 1 }], 160);
+  assert.deepEqual(repeated.bins[0].pool, ['重复', '另一条']);
+});
+
 test('nested phrases with different counts survive and cached results preserve repeated messages',()=>{
   const rows = ['内存价格上涨', '内存价格上涨', '内存价格'].map(text => ({ text, mode: 1, pool: 0 }));
   const result = wordStats(rows, true);

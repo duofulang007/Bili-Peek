@@ -121,7 +121,7 @@ test('real helper: automatic pairing, origin/auth checks, replay/expiry rejectio
     if (child && child.exitCode === null) { const exited = once(child, 'exit'); child.kill(); await exited; }
   }
   async function request(endpoint, headers = {}) {
-    const response = await fetch(`http://127.0.0.1:${port}${endpoint}`, { method: endpoint === '/pair' ? 'POST' : 'GET', headers, signal: AbortSignal.timeout(1000) });
+    const response = await fetch(`http://127.0.0.1:${port}${endpoint}`, { method: endpoint === '/pair' || /\/(pause|resume|cancel)$/.test(endpoint) ? 'POST' : 'GET', headers, signal: AbortSignal.timeout(1000) });
     return { status: response.status, body: await response.json() };
   }
   try {
@@ -138,6 +138,12 @@ test('real helper: automatic pairing, origin/auth checks, replay/expiry rejectio
     assert.deepEqual(exchanges.find(item => item.status === 200).body, { token: config.token, port });
     assert.equal((await request('/pair', { 'X-Bili-Peek-Ticket': ticket })).status, 401);
     const auth = { 'X-Bili-Peek-Token': config.token, 'X-Bili-Peek-Client': 'userscript' };
+    for (const action of ['pause', 'resume', 'cancel']) {
+      const endpoint = `/jobs/${'a'.repeat(20)}/${action}`;
+      assert.equal((await request(endpoint)).status, 401, 'control actions require pairing');
+      assert.equal((await request(endpoint, auth)).status, 409, 'ended/missing jobs cannot be controlled');
+      assert.equal((await request(endpoint, { ...auth, Origin: 'https://evil.example' })).status, 403);
+    }
     assert.equal((await request('/health', auth)).body.ready, true);
     assert.equal(await preparePairing(config, directory), null, 'an already connected browser must not be opened again');
     await stop(); await start();

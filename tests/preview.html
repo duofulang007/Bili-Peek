@@ -41,6 +41,9 @@
 <script>
 // Only this fixture redirects network requests; the installed userscript requests Bilibili.
 window.fixtureMenus = {};
+if (new URL(location.href).searchParams.has('download-demo')) {
+  window.fixtureExport = 'success'; window.fixtureSegments = true; GM_setValue('export-token', 'a'.repeat(64));
+}
 window.GM_registerMenuCommand = (name, callback) => { window.fixtureMenus[name] = callback; };
 window.GM_setClipboard = text => { window.fixtureDiagnostic = JSON.parse(text); };
 window.GM_xmlhttpRequest=options=>{
@@ -48,10 +51,15 @@ window.GM_xmlhttpRequest=options=>{
     const endpoint = new URL(options.url).pathname;
     if (window.fixtureHelperOffline) { setTimeout(() => options.onerror(), 60); return { abort() {} }; }
     let result = {};
-    if (endpoint === '/health') result = { ready: true };
+    if (endpoint === '/health') result = { ready: true, segmentAvailable: Boolean(window.fixtureSegments) };
     if (endpoint === '/sign-wbi') { window.fixtureQuality = JSON.parse(options.data).params.qn; result = { query: 'bvid=BVLocalPreview&cid=1001&qn=' + window.fixtureQuality }; }
     if (endpoint === '/clips') { window.fixtureLatestClip = JSON.parse(options.data); window.fixtureJobPolls = 0; result = { key: 'a'.repeat(20) }; }
-    if (endpoint.startsWith('/jobs/')) result = window.fixtureExport === 'fail' ? { state: 'failed', error: '模拟写入失败' } : ++window.fixtureJobPolls === 1 ? { state: 'processing', stage: 'media', percent: 42, elapsedSeconds: 8 } : { state: 'complete', filename: '测试片段.md', hasSubtitles: !window.fixtureLatestClip.videoOnly, obsidianUri: 'obsidian://open?path=test.md' };
+    if (endpoint.startsWith('/jobs/')) {
+      const action = endpoint.split('/')[3];
+      if (action) { if (action === 'cancel') window.fixtureCancelled = true; else window.fixturePaused = action === 'pause'; result = { paused: Boolean(window.fixturePaused) }; }
+      else if (window.fixtureSegments) result = window.fixtureCancelled ? { state: 'cancelled' } : { state: 'processing', stage: window.fixtureStage || 'download', canPause: !window.fixtureStage, paused: Boolean(window.fixturePaused), percent: window.fixtureStage ? 1 : 42, downloadedBytes: 44040192, totalBytes: 104857600, bytesPerSecond: window.fixturePaused ? 0 : 2097152, etaSeconds: window.fixturePaused ? null : 29, elapsedSeconds: 8 };
+      else result = window.fixtureExport === 'fail' ? { state: 'failed', error: '模拟写入失败' } : ++window.fixtureJobPolls === 1 ? { state: 'processing', stage: 'media', percent: 42, elapsedSeconds: 8 } : { state: 'complete', filename: '测试片段.md', hasSubtitles: !window.fixtureLatestClip.videoOnly, obsidianUri: 'obsidian://open?path=test.md' };
+    }
     setTimeout(() => options.onload({ status: 200, responseText: JSON.stringify(result) }), 60);
     return { abort() {} };
   }
@@ -65,7 +73,7 @@ window.GM_xmlhttpRequest=options=>{
     setTimeout(() => options.onload({ status: 200, responseText: JSON.stringify({ data: { wbi_img: { img_url: 'https://i.example/' + 'a'.repeat(32) + '.png', sub_url: 'https://i.example/' + 'b'.repeat(32) + '.png' } } }) }), 30); return { abort() {} };
   }
   if (window.fixtureExport && /\/x\/player\/wbi\/playurl\?/.test(options.url)) {
-    setTimeout(() => options.onload({ status: 200, responseText: JSON.stringify({ code: 0, data: { dash: { video: [{ id: window.fixtureQuality, codecs: 'avc1', height: 720, baseUrl: 'https://test.bilivideo.com/video.m4s' }], audio: [{ bandwidth: 100, baseUrl: 'https://test.bilivideo.com/audio.m4s' }] } } }) }), 30); return { abort() {} };
+    setTimeout(() => options.onload({ status: 200, responseText: JSON.stringify({ code: 0, data: { dash: { video: (window.fixtureDownloadQualities || [120, 80, 64, 32]).map(id => ({ id, codecs: 'avc1', height: id === 80 ? 1080 : 720, baseUrl: 'https://test.bilivideo.com/video-' + id + '.m4s', SegmentBase: { Initialization: '0-3', indexRange: '4-71' } })), audio: [{ bandwidth: 100, baseUrl: 'https://test.bilivideo.com/audio.m4s', SegmentBase: { Initialization: '0-3', indexRange: '4-71' } }] } } }) }), 30); return { abort() {} };
   }
   const controller=new AbortController();
   if(window.fixtureEmptyNext && options.responseType==='arraybuffer') {window.fixtureEmptyNext=false; setTimeout(()=>options.onload({status:200,response:new ArrayBuffer(0)}),30); return {abort:()=>controller.abort()};}

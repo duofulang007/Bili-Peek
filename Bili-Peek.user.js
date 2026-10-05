@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bili-Peek · 弹幕观看助手
 // @namespace    bili-peek
-// @version      0.3.39
+// @version      0.3.43
 // @description  视频右侧双图：弹幕词云与可点击跳转的密度图，推荐视频保留在下方。
 // @match        https://www.bilibili.com/video/*
 // @match        https://www.bilibili.com/
@@ -201,16 +201,15 @@
   function density(records, duration, term = '') {
     const normalizedTerm = term ? normalize(term) : '';
     const width = Math.max(1, Math.ceil(duration / 160));
-    const bins = Array.from({ length: Math.max(1, Math.ceil(duration / width)) }, (_, i) => ({ time: i * width, count: 0, selected: 0, samples: [], pool: [] }));
+    const bins = Array.from({ length: Math.max(1, Math.ceil(duration / width)) }, (_, i) => ({ time: i * width, count: 0, selected: 0, samples: [] }));
     for (const record of records) {
       if (record.time < 0 || record.time > duration) continue;
       const bin = bins[Math.min(bins.length - 1, Math.floor(record.time / width))];
       bin.count++;
       const matches = !normalizedTerm || normalize(record.text).includes(normalizedTerm);
       if (normalizedTerm && matches) bin.selected++;
-      if (matches && record.mode <= 6 && !bin.pool.includes(record.text) && bin.pool.length < 20) bin.pool.push(record.text);
+      if (matches && record.mode <= 6 && bin.samples.length < 3 && !bin.samples.includes(record.text)) bin.samples.push(record.text);
     }
-    for (const bin of bins) bin.samples = bin.pool.slice(0, 3);
     return { bins, width };
   }
 
@@ -295,22 +294,6 @@
   }
 
   // The same data and timing logic is checked in Node without a browser.
-  function qualityFromLabel(label) {
-    const text = String(label || '').toUpperCase().replace(/\s+/g, '');
-    if (/杜比|DOLBY/.test(text)) return 126;
-    if (/HDR/.test(text)) return 125;
-    if (/8K/.test(text)) return 127;
-    if (/4K|2160P/.test(text)) return 120;
-    if (/1080P60/.test(text)) return 116;
-    if (/1080P\+|1080P高码率/.test(text)) return 112;
-    if (/1080P/.test(text)) return 80;
-    if (/720P60/.test(text)) return 74;
-    if (/720P/.test(text)) return 64;
-    if (/480P/.test(text)) return 32;
-    if (/360P/.test(text)) return 16;
-    return null;
-  }
-
   function selectQualityStream(streams, quality) {
     const matching = (streams || []).filter(item => Number(item.id) === quality);
     return matching.find(item => item.codecs?.startsWith('avc')) || matching[0];
@@ -339,7 +322,7 @@
   function defaultDownloadQuality(qualities) { return qualities.find(item => item.id === 80)?.id || qualities[0]?.id; }
 
   if (typeof document === 'undefined') {
-    if (typeof module !== 'undefined') module.exports = { formatTime, overallProgress, routeKey, seekMedia, decodeDanmaku, density, wordStats, parsePageState, mergeWatchRanges, watchedAdvance, qualityFromLabel, selectQualityStream, selectMediaUrl, downloadQualities, defaultDownloadQuality };
+    if (typeof module !== 'undefined') module.exports = { formatTime, overallProgress, routeKey, seekMedia, decodeDanmaku, density, wordStats, parsePageState, mergeWatchRanges, watchedAdvance, selectQualityStream, selectMediaUrl, downloadQualities, defaultDownloadQuality };
     return;
   }
   if (window.top !== window.self || document.getElementById(HOST_ID)) return;
@@ -350,6 +333,8 @@
   let dataRoute = null, dataRequest = null, chartData = null, hoverTime = 0;
   let watchRoute = null, watchRanges = [], watchSample = null, watchStart = null, watchDirty = false, watchSavedAt = 0;
   let seekNoticeTimer, openNoteTimer;
+  // 非空时表示「下一次 renderCharts 是从加载态落地」，落地后由 renderCharts 清空。
+  let settleCharts = null;
   const exportDrafts = new Map();
   let clipRange = null, rangeDrag = null;
   const exportingRoutes = new Set(), transferStates = new Map();
@@ -368,8 +353,10 @@
   const styles = `
     :host{display:block;pointer-events:auto;width:100%;min-width:0;margin:0 0 18px;color-scheme:light;
       --bg:#fff;--text:#18191c;--muted:#61666d;--line:#e3e5e7;--accent:#5287d5;--fill:#5287d540;--shadow:#00000024;
+      /* --live 是加载动效的品牌粉（装饰用，可低对比）；--live-ink 是内容态曲线/文字用的可读档。 */
+      --live:#fb7299;--live-soft:#fb729926;--live-ink:#d63b6e;--live-ink-soft:#d63b6e26;
       color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',sans-serif}
-    :host([data-theme=dark]){color-scheme:dark;--bg:#18191b;--text:#eceef0;--muted:#a6a9af;--line:#36383c;--accent:#829eed;--fill:#6e8be96b;--shadow:#0009}
+    :host([data-theme=dark]){color-scheme:dark;--bg:#18191b;--text:#eceef0;--muted:#a6a9af;--line:#36383c;--accent:#829eed;--fill:#6e8be96b;--shadow:#0009;--live:#fb7299;--live-soft:#fb729933;--live-ink:#fb7299;--live-ink-soft:#fb729933}
     :host([hidden]),[hidden]{display:none!important}*{box-sizing:border-box}
     figure{position:relative;display:flex;flex-direction:column;height:var(--card-height,292px);background:var(--bg);margin:0 0 20px;padding:12px 10px 8px;border:1px solid var(--line);border-radius:6px}
     figure:last-of-type{margin-bottom:0}figcaption{flex:none}
@@ -377,14 +364,50 @@
     select,button{color:var(--muted);background:var(--bg);border:1px solid var(--line);border-radius:4px;font:12px/1.4 inherit;cursor:pointer;padding:3px 6px}
     select{margin-left:auto;max-width:128px}button:focus-visible,select:focus-visible,[role=button]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
     svg{display:block;width:100%;overflow:visible;flex:1;min-height:0}#density{cursor:crosshair;touch-action:pan-y}
-    #cloud text{fill:var(--text);cursor:pointer}#cloud text:hover,#cloud text.selected{fill:var(--accent)}
+    #cloud text{fill:var(--text);cursor:pointer}#cloud text.hot{fill:var(--live-ink)}#cloud text.warm{fill:var(--accent)}
+    #cloud text:hover,#cloud text.selected{fill:var(--live-ink)}
     #cloud .term-count{fill:var(--muted);font-weight:400}#cloud text.selected{font-weight:700;text-decoration:underline}
     #cloud-note{display:none}
     #open-note{color:var(--accent);display:grid;place-items:center;width:28px;height:28px;padding:5px;margin-left:auto;text-decoration:none;border:1px solid var(--line);border-radius:4px}#open-note:hover{background:var(--fill)}
     #recent-tags{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}#export-dialog #recent-tags button{padding:3px 7px;font-size:12px}.clip-summary{color:var(--muted);font-size:12px;margin:-10px 0 14px}
-    .grid{stroke:var(--line);stroke-width:.7}.axis{fill:var(--muted);font-size:10px}.area{fill:var(--fill)}.curve{stroke:var(--accent);fill:none;stroke-width:1.8}
+    .grid{stroke:var(--line);stroke-width:.7}.axis{fill:var(--muted);font-size:10px}
+    .area{fill:var(--live-ink-soft)}.curve{stroke:var(--live-ink);fill:none;stroke-width:1.8}
+    .peak{fill:var(--bg);stroke:var(--live-ink);stroke-width:1.5}
     .match{stroke:#eab66b;fill:none;stroke-width:2}.playhead{stroke:var(--text);stroke-dasharray:3 3;stroke-width:1}.hover{stroke:var(--muted);stroke-dasharray:2 3}
     .empty{position:absolute;inset:48px 12px 25px;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;color:var(--muted);font-size:13px;text-align:center}
+    /* 加载态：呼吸点 + 阶段叙事。用 --live 专属色，不改 --accent，避免影响任何控件配色。 */
+    .load{display:none;flex-direction:column;align-items:center;gap:12px}
+    .empty[data-load=on]{gap:0;background:radial-gradient(58% 46% at 50% 50%,var(--live-soft),transparent 72%)}
+    .empty[data-load=on] .load{display:flex}
+    .load-pulse{display:flex;align-items:center;gap:6px;height:8px}
+    .load-pulse i{display:block;width:5px;height:5px;border-radius:50%;background:var(--live);opacity:.25;animation:bili-pulse 1.7s ease-in-out infinite}
+    .load-pulse i:nth-child(2){width:8px;height:8px;animation-delay:.18s}
+    .load-pulse i:nth-child(3){animation-delay:.36s}
+    @keyframes bili-pulse{0%,100%{opacity:.22;transform:scale(.82)}50%{opacity:1;transform:scale(1.12)}}
+    .load-rail{width:78px;height:1px;background:linear-gradient(90deg,transparent,var(--live),transparent);animation:bili-rail 1.7s ease-in-out infinite}
+    @keyframes bili-rail{0%,100%{transform:scaleX(.25);opacity:.35}50%{transform:scaleX(1);opacity:1}}
+    .load-phase{color:var(--muted);font-size:12px;line-height:17px;min-height:17px}
+    .load-phase.phase-in{animation:bili-phase .34s ease-out}
+    @keyframes bili-phase{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+    figure.settle{animation:bili-settle .62s ease-out}
+    @keyframes bili-settle{0%{border-color:var(--live)}100%{border-color:var(--line)}}
+    /* 落地衔接：骨架先淡出，真内容再错峰入场，避免「啪」地一下换掉。 */
+    .empty.leaving{opacity:0;transition:opacity .3s ease}
+    #cloud.enter text{animation:word-in .42s cubic-bezier(.2,1.15,.35,1) backwards}
+    @keyframes word-in{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+    #density .curve.enter{stroke-dasharray:var(--len);stroke-dashoffset:var(--len);animation:curve-in .82s cubic-bezier(.32,.9,.32,1) forwards}
+    @keyframes curve-in{to{stroke-dashoffset:0}}
+    #density .area.enter{animation:area-in .62s ease .1s backwards}
+    @keyframes area-in{from{opacity:0}to{opacity:1}}
+    #density .peak.enter{animation:peak-in .3s ease backwards}
+    @keyframes peak-in{from{opacity:0;transform:scale(.4)}to{opacity:1;transform:none}}
+    #density .peak{transform-box:fill-box;transform-origin:center}
+    @media (prefers-reduced-motion:reduce){
+      .load-pulse i,.load-rail,.load-phase.phase-in,figure.settle{animation:none}
+      .load-pulse i{opacity:.55}
+      .empty.leaving{transition:none}
+      #cloud.enter text,#density .curve.enter,#density .area.enter,#density .peak.enter{animation:none;stroke-dashoffset:0}
+    }
     .timeline-info{position:absolute;left:2px;right:2px;bottom:calc(100% + 6px);display:flex;align-items:flex-end;justify-content:center;z-index:2;pointer-events:none}
     #tooltip{max-width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);box-shadow:0 6px 20px var(--shadow);color:var(--text);font-size:12px;line-height:18px;overflow-wrap:anywhere;pointer-events:none}
     #tooltip .detail-title{font-weight:600;font-variant-numeric:tabular-nums;margin-bottom:2px}
@@ -439,10 +462,12 @@
     const rect = ui.density.getBoundingClientRect();
     return Math.max(0, Math.min(videoDuration, ((clientX - rect.left) / rect.width * 320 - 32) / 276 * videoDuration));
   }
+  // Keep in sync with @version above (the value is substituted by the test suite's guard test).
+  const SCRIPT_VERSION = '0.3.43';
   function createPanel() {
     host = document.createElement('div');
     host.id = HOST_ID;
-    host.dataset.version = '0.3.39';
+    host.dataset.version = SCRIPT_VERSION;
     // Bilibili / other scripts can disable hit testing on the whole right rail.
     // Override inheritance only on our panel, never re-enable native controls.
     host.style.setProperty('pointer-events', 'auto', 'important');
@@ -643,13 +668,14 @@
       try {
         const draftKey = `${taskRoute}:${range.start}:${range.end}`;
         const token = savedValue('export-token', '');
-        let health;
-        if (token) { try { health = await helperRequest('/health', token, undefined, 2000); } catch {} }
         let exportMedia;
-        if (token && health?.ready) { status('正在读取可下载画质…'); exportMedia = await loadExportMedia(taskRoute, token); }
-        if (taskRoute !== currentRoute || taskRoute !== routeKey(location.href)) return;
         status('');
-        const metadata = await askExportMetadata(draftKey, range, Boolean(health?.segmentAvailable), exportMedia?.qualities);
+        const metadata = await askExportMetadata(draftKey, range, token ? async () => {
+          const health = await helperRequest('/health', token, undefined, 2000);
+          if (!health?.ready) throw new Error('助手尚未就绪，请检查 CPod 运行状态后重试');
+          exportMedia = await loadExportMedia(taskRoute, token);
+          return { segmentAvailable: Boolean(health.segmentAvailable), qualities: exportMedia.qualities };
+        } : null);
         if (!metadata) return;
         if (taskRoute !== currentRoute || taskRoute !== routeKey(location.href)) { status('视频已切换，请重新选择片段后保存。', true); return; }
         if (typeof GM_getValue !== 'function' || typeof GM_setValue !== 'function') throw new Error('请在油猴中更新脚本权限后保存。');
@@ -715,7 +741,7 @@
     updateClipUI();
   }
 
-  function askExportMetadata(draftKey, range, segmentAvailable = false, qualities = []) {
+  function askExportMetadata(draftKey, range, loadMedia = null) {
     return new Promise(resolve => {
       const dialog = document.createElement('dialog'); dialog.id = 'export-dialog';
       dialog.innerHTML = `<form><h2>保存片段</h2><label>笔记名称<input id="export-name" maxlength="80" required></label><label>标签 <small>必填，用逗号分隔</small><input id="export-tags" placeholder="例如：学习/编程，待整理" required></label><label>摘要 <small>选填</small><textarea id="export-summary" maxlength="2000" placeholder="简单描述这段内容，也可以留空"></textarea></label><div class="dialog-actions"><button id="export-cancel" type="button">取消</button><button id="export-confirm" type="submit">保存</button></div></form>`;
@@ -724,13 +750,32 @@
       const summary = dialog.querySelector('#export-summary');
       const qualityLabel = document.createElement('label'); qualityLabel.textContent = '下载画质';
       const quality = document.createElement('select'); quality.id = 'export-quality'; qualityLabel.append(quality);
-      if (qualities.length) {
-        for (const item of qualities) { const option = document.createElement('option'); option.value = String(item.id); option.textContent = item.label; quality.append(option); }
-        quality.value = String(defaultDownloadQuality(qualities));
-      } else { const option = document.createElement('option'); option.textContent = '连接助手后读取'; quality.append(option); quality.disabled = true; }
+      const option = document.createElement('option'); option.textContent = loadMedia ? '正在读取可下载画质…' : '连接助手后读取'; quality.append(option); quality.disabled = true;
+      const confirm = dialog.querySelector('#export-confirm'); confirm.disabled = Boolean(loadMedia);
+      const qualityStatus = document.createElement('small'); qualityStatus.id = 'export-quality-status'; qualityStatus.setAttribute('role', 'status'); qualityLabel.append(qualityStatus);
+      const retry = document.createElement('button'); retry.id = 'export-quality-retry'; retry.type = 'button'; retry.textContent = '重试读取画质'; retry.hidden = true; qualityLabel.append(retry);
+      let mediaReady = !loadMedia, segmentAvailable = false;
+      const refreshQuality = async () => {
+        retry.hidden = true; qualityStatus.textContent = '正在读取可下载画质…';
+        try {
+          const result = await loadMedia();
+          if (!dialog.isConnected) return;
+          quality.replaceChildren();
+          for (const item of result.qualities) { const option = document.createElement('option'); option.value = String(item.id); option.textContent = item.label; quality.append(option); }
+          const savedQuality = exportDrafts.get(draftKey)?.downloadQuality;
+          quality.value = String(result.qualities.some(item => item.id === savedQuality) ? savedQuality : defaultDownloadQuality(result.qualities));
+          quality.disabled = false; confirm.disabled = false; mediaReady = true; segmentAvailable = result.segmentAvailable;
+          qualityStatus.textContent = '';
+        } catch (error) {
+          if (!dialog.isConnected) return;
+          quality.children[0].textContent = '读取失败，请重试';
+          qualityStatus.textContent = error.message; retry.hidden = false;
+        }
+      };
+      retry.addEventListener('click', refreshQuality);
       name.parentElement.after(qualityLabel);
       const saved = exportDrafts.get(draftKey);
-      if (saved) { name.value = saved.noteName; tags.value = saved.tagText; summary.value = saved.summary; if (qualities.some(item => item.id === saved.downloadQuality)) quality.value = String(saved.downloadQuality); }
+      if (saved) { name.value = saved.noteName; tags.value = saved.tagText; summary.value = saved.summary; }
       const context = document.createElement('p'); context.className = 'clip-summary';
       context.textContent = `${formatTime(range.start)}–${formatTime(range.end)} · ${Math.round(range.end - range.start)} 秒`;
       dialog.querySelector('h2').after(context);
@@ -744,7 +789,7 @@
           tags.setCustomValidity(''); tags.focus();
         }); recent.append(button);
       }
-      const remember = () => exportDrafts.set(draftKey, { noteName: name.value, tagText: tags.value, summary: summary.value, downloadQuality: quality.disabled ? undefined : Number(quality.value) });
+      const remember = () => exportDrafts.set(draftKey, { noteName: name.value, tagText: tags.value, summary: summary.value, downloadQuality: quality.disabled ? exportDrafts.get(draftKey)?.downloadQuality : Number(quality.value) });
       dialog.addEventListener('input', remember);
       const finish = value => { dialog.close(); dialog.remove(); resolve(value); };
       dialog.addEventListener('cancel', event => { event.preventDefault(); finish(null); });
@@ -752,6 +797,7 @@
       tags.addEventListener('input', () => tags.setCustomValidity(''));
       dialog.querySelector('form').addEventListener('submit', event => {
         event.preventDefault();
+        if (!mediaReady) return;
         const parsed = [...new Set(tags.value.split(/[,，\s]+/).map(tag => tag.replace(/^#+/, '').trim()).filter(Boolean))];
         if (!parsed.length || parsed.length > 20 || parsed.some(tag => !/^[\p{L}\p{N}_-]+(?:\/[\p{L}\p{N}_-]+)*$/u.test(tag) || /^\d+$/.test(tag) || tag.length > 100)) {
           tags.setCustomValidity('请填写 1–20 个有效标签，可用中文、字母、数字、下划线、短横线和层级斜杠，不能只有数字。'); tags.reportValidity(); return;
@@ -761,6 +807,7 @@
         finish({ noteName: name.value.trim(), tags: parsed, summary: summary.value.trim(), ...(quality.disabled ? {} : { downloadQuality: Number(quality.value) }), ...(segmentAvailable ? { downloadEngine: 'nre' } : {}) });
       });
       host.shadowRoot.append(dialog); dialog.showModal(); name.focus(); name.select();
+      if (loadMedia) refreshQuality();
     });
   }
 
@@ -964,8 +1011,13 @@
   function drawCloud() {
     ui.cloud.replaceChildren();
     const terms = wordStats(records, phraseMode);
-    ui['cloud-empty'].hidden = terms.length > 0;
-    ui['cloud-empty'].textContent = phraseMode ? '没有重复出现的短语，请切换高频词。' : '暂无可用的弹幕词语';
+    // 落地编排期间先别急着隐藏骨架，playLanding 会先淡出再收起。
+    ui['cloud-empty'].hidden = terms.length > 0 && !settleCharts;
+    if (!terms.length) {
+      // 空态是纯文字，不能残留加载骨架的粉色光晕。
+      ui['cloud-empty'].dataset.load = 'off'; delete ui['cloud-empty'].dataset.phase;
+      ui['cloud-empty'].textContent = phraseMode ? '没有重复出现的短语，请切换高频词。' : '暂无可用的弹幕词语';
+    }
     ui['cloud-note'].textContent = phraseMode ? '连续 2–4 个词 · 至少 2 条弹幕重复提及' : '单个词语 · 数字为提及它的弹幕条数';
     ui.mode.title = phraseMode ? '统计连续出现的 2–4 个词，保留重复短语；不是语义总结' : '中文分词，按提及该词的弹幕条数排序';
     ui.clear.hidden = !selectedTerm;
@@ -1007,7 +1059,10 @@
       let x = 4;
       const gap = row.items.length > 1 ? 12 + Math.min(10, (312 - row.width) / (row.items.length - 1)) : 0;
       for (const { term, size, w } of row.items) {
-        const word = svgNode('text', { x, y: row.y + row.height / 2, 'dominant-baseline': 'central', 'font-size': size, role: 'button', tabindex: 0, class: selectedTerm === term.text ? 'selected' : '', 'aria-pressed': String(selectedTerm === term.text), 'aria-label': `${term.text}，${term.count} 条弹幕提及`, 'data-term': term.text }, term.text);
+        // 高频词用品牌粉、次档沿用蓝、其余走正文色 —— 只上色，不改字号与排布。
+        const rank = term.count / max;
+        const tone = rank >= .6 ? 'hot' : rank >= .28 ? 'warm' : '';
+        const word = svgNode('text', { x, y: row.y + row.height / 2, 'dominant-baseline': 'central', 'font-size': size, role: 'button', tabindex: 0, class: `${tone}${selectedTerm === term.text ? ' selected' : ''}`, 'aria-pressed': String(selectedTerm === term.text), 'aria-label': `${term.text}，${term.count} 条弹幕提及`, 'data-term': term.text }, term.text);
         word.append(svgNode('tspan', { dx: 4, 'font-size': 11, class: 'term-count' }, String(term.count)));
         word.append(svgNode('title', {}, `${term.count} 条弹幕提及；点击在密度图中显示出现时段`));
         const choose = () => { selectedTerm = selectedTerm === term.text ? '' : term.text; renderCharts(); };
@@ -1042,6 +1097,18 @@
     if (records.length) {
       ui.density.append(svgNode('path', { d: `M32,${bottom} ${path('count').replace(/^M/, 'L')} L308,${bottom} Z`, class: 'area' }));
       ui.density.append(svgNode('path', { d: path('count'), class: 'curve' }));
+      // 局部峰值打一个空心点，给密度的「波峰」一个视觉落点。
+      // 密集锯齿数据里相邻 bin 差距很小，所以用「不小于邻点」而不是严格大于是等号，
+      // 并跳过比前一个点低的点，否则整条曲线会被点满。
+      let previous = -1;
+      for (let i = 1; i < bins.length - 1; i++) {
+        const count = bins[i].count;
+        if (count < max * .4) continue;
+        if (count < bins[i - 1].count || count < bins[i + 1].count) continue;
+        if (count < previous) continue;
+        previous = count;
+        ui.density.append(svgNode('circle', { cx: x(Math.min(videoDuration, bins[i].time + width / 2)).toFixed(2), cy: y(count).toFixed(2), r: 2.6, class: 'peak' }));
+      }
     } else {
       ui.density.append(svgNode('text', { x: 170, y: (22 + bottom) / 2, 'text-anchor': 'middle', class: 'axis' }, '暂无弹幕，仍可选择截取时段'));
     }
@@ -1051,7 +1118,7 @@
     ui.density.append(svgNode('line', { x1: 32, x2: 32, y1: 22, y2: bottom, class: 'playhead' }));
     ui.density.append(svgNode('line', { x1: 32, x2: 32, y1: 22, y2: bottom, class: 'hover', visibility: 'hidden' }));
     if (selectedTerm) ui.density.append(svgNode('text', { x: 32, y: 13, class: 'axis' }, `橙线：${selectedTerm}`));
-    ui['density-empty'].hidden = true;
+    ui['density-empty'].hidden = !settleCharts;
     if (!clipRange && videoDuration >= 1) clipRange = { start: 0, end: Math.min(30, Math.floor(videoDuration)) };
     updateClipUI();
     renderMedia();
@@ -1060,6 +1127,9 @@
     diagnostic.charts++;
     ui.tooltip.hidden = true;
     drawCloud(); drawDensity();
+    // 只有「从加载态进入真实内容」这一跳才给落定高光，
+    // 词条点击、模式切换等重绘不该反复闪。
+    if (settleCharts) { const fire = settleCharts; settleCharts = null; fire(); }
   }
   function showTooltip(time) {
     if (!chartData) return;
@@ -1069,15 +1139,10 @@
     const end = Math.min(videoDuration, bin.time + chartData.width);
     const title = document.createElement('div'); title.className = 'detail-title';
     title.textContent = `${formatTime(bin.time)}–${formatTime(end)} · ${bin.count} 条${selectedTerm ? ` ·「${selectedTerm}」${bin.selected} 条` : ''}`;
-    function pickSamples(term) {
-      const normalized = term ? normalize(term) : '';
-      const pool = normalized ? records.filter(record => record.mode <= 6 && normalize(record.text).includes(normalized)) : records;
-      let target = chartData.bins[index];
-      if (normalized && !pool.some(record => record.time >= bin.time && record.time < bin.time + chartData.width)) target = chartData.bins[index - 1];
-      return target?.samples || [];
-    }
-    const samples = pickSamples(selectedTerm).map(text => {
-      const line = document.createElement('div'); line.className = 'detail-sample'; line.textContent = text; return line;
+    const sampleBin = selectedTerm && !bin.samples.length ? chartData.bins[index - 1] : bin;
+    const samples = (sampleBin?.samples || []).map(text => {
+      const line = document.createElement('div'); line.className = 'detail-sample';
+      line.textContent = sampleBin === bin ? text : `邻近 ${formatTime(sampleBin.time)}：${text}`; return line;
     });
     ui.tooltip.replaceChildren(title, ...samples);
     ui.tooltip.hidden = false;
@@ -1104,19 +1169,112 @@
         ontimeout: () => finish(new Error('弹幕请求超时')), onabort: () => finish(new Error('已取消')) });
     });
   }
-  function loading(message, retry = false) {
+  // 加载叙事：把「第 N/M 段」这种内部进度换成用户能理解的阶段名。
+  // 进度仍由调用方按真实分段数推进，只是文案不再暴露实现细节。
+  const LOAD_PHASES = [
+    { at: 0, cloud: '接入弹幕流', density: '连接弹幕接口' },
+    { at: .35, cloud: '抓取弹幕分段', density: '读取弹幕数据' },
+    { at: .8, cloud: '统计高频词', density: '计算弹幕密度' },
+    { at: 1, cloud: '排列词云', density: '绘制密度曲线' },
+  ];
+  function loadPhase(ratio) {
+    let phase = LOAD_PHASES[0];
+    for (const item of LOAD_PHASES) if (ratio >= item.at) phase = item;
+    return phase;
+  }
+  function showLoadStage(key, ratio) {
+    const node = ui[key];
+    const phase = loadPhase(ratio);
+    const label = phase[key === 'cloud-empty' ? 'cloud' : 'density'];
+    // 阶段没变就不动 DOM，避免每段请求都重放一次进场动画。
+    if (node.dataset.phase === label) return;
+    node.dataset.phase = label;
+    node.dataset.load = 'on';
+    node.replaceChildren();
+    const wrap = document.createElement('div');
+    wrap.className = 'load';
+    wrap.setAttribute('aria-hidden', 'true');
+    const pulse = document.createElement('div');
+    pulse.className = 'load-pulse';
+    pulse.append(document.createElement('i'), document.createElement('i'), document.createElement('i'));
+    const rail = document.createElement('div');
+    rail.className = 'load-rail';
+    const text = document.createElement('div');
+    text.className = 'load-phase phase-in';
+    text.textContent = label;
+    wrap.append(pulse, rail, text);
+    node.append(wrap);
+  }
+  // 真实内容到达时给一道落定高光，让「加载好了」这件事有明确的落点。
+  // 落地衔接：把「骨架 → 真实内容」这一跳做成有次序的编排，而不是整块替换。
+  // 顺序是 骨架淡出 → 边框落定高光 → 折线自左向右画出 → 词条按行错峰浮现 → 峰值点点亮。
+  const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function playLanding() {
+    const cloud = ui.cloud, density = ui.density;
+    const curve = density.querySelector('.curve'), area = density.querySelector('.area');
+    const peaks = [...density.querySelectorAll('.peak')];
+    const words = [...cloud.querySelectorAll('text')];
+    const instant = reducedMotion();
+
+    // 1) 骨架淡出，别让它和真内容抢同一帧
+    for (const key of ['cloud-empty', 'density-empty']) {
+      const node = ui[key];
+      node.classList.add('leaving');
+      setTimeout(() => { node.hidden = true; node.classList.remove('leaving'); }, instant ? 0 : 300);
+    }
+    // 2) 边框高光
+    for (const figure of [cloud.closest('figure'), ui.timeline]) {
+      if (!figure) continue;
+      figure.classList.remove('settle');
+      void figure.offsetWidth;
+      figure.classList.add('settle');
+      setTimeout(() => figure.classList.remove('settle'), 640);
+    }
+
+    if (instant) return;
+
+    // 3) 折线自左向右画出。getTotalLength 给的是用户单位长度，
+    // 而 density 带 preserveAspectRatio=none，所以这里不能用 getBoundingClientRect 的宽度。
+    if (curve) {
+      const length = Math.ceil(curve.getTotalLength());
+      curve.style.setProperty('--len', length);
+      curve.classList.add('enter');
+      setTimeout(() => curve.classList.remove('enter'), 900);
+    }
+    if (area) { area.classList.add('enter'); setTimeout(() => area.classList.remove('enter'), 760); }
+    // drawCloud 已按行、从左到右插入词条，直接沿用 DOM 顺序。
+    words.forEach((word, index) => { word.style.animationDelay = (90 + index * 26) + 'ms'; });
+    cloud.classList.add('enter');
+    // 峰值点跟随折线收尾再亮
+    peaks.forEach((peak, i) => { peak.style.animationDelay = (620 + i * 40) + 'ms'; peak.classList.add('enter'); });
+    const total = 90 + words.length * 26 + 420;
+    setTimeout(() => {
+      cloud.classList.remove('enter');
+      for (const word of words) word.style.removeProperty('animation-delay');
+      for (const peak of peaks) { peak.classList.remove('enter'); peak.style.removeProperty('animation-delay'); }
+    }, total + 200);
+  }
+  function loading(message, retry = false, ratio = 0) {
     chartData = null; records = [];
     rangeDrag = null; updateClipUI();
     ui['cloud-note'].textContent = '';
     ui.cloud.replaceChildren(); ui.density.replaceChildren(); ui.tooltip.hidden = true; ui.clear.hidden = true;
     for (const key of ['cloud-empty', 'density-empty']) {
-      ui[key].hidden = false; ui[key].replaceChildren(document.createTextNode(message));
-      if (retry && key === 'density-empty') {
-        const button = document.createElement('button'); button.textContent = '重试';
-        button.addEventListener('click', () => loadData(currentRoute, true)); ui[key].append(button);
-      }
+      const node = ui[key];
+      node.hidden = false;
+      if (retry) {
+        // 出错时保持纯文字 + 重试按钮，不显示加载骨架。
+        node.dataset.load = 'off'; delete node.dataset.phase;
+        node.replaceChildren(document.createTextNode(message));
+        if (key === 'density-empty') {
+          const button = document.createElement('button'); button.textContent = '重试';
+          button.addEventListener('click', () => loadData(currentRoute, true)); node.append(button);
+        }
+      } else showLoadStage(key, ratio);
     }
     status(''); renderMedia();
+    // 埋下落定高光：只有接下来这次 renderCharts 是真数据落地时才闪。
+    if (!retry) settleCharts = playLanding;
   }
   async function loadData(key, force = false) {
     if (dataRoute === key && !force) return;
@@ -1148,7 +1306,9 @@
         // Sequential requests keep the userscript small and avoid bursts of requests.
         for (let index = 1; index <= total; index++) {
           if (!valid()) return;
-          loading(`正在加载弹幕 ${index}/${total}…`);
+          // 真实进度推进阶段文案，不再显示 2/7 这类内部计数。
+          // 仍走 loading() 这一个入口，测试沙箱替换 loading 即可隔离视图层。
+          if (total > 1) loading('', false, (index - 1) / (total - 1));
           const buffer = await request(`https://api.bilibili.com/x/v2/dm/web/seg.so?type=1&oid=${page.cid}&pid=${info.data.aid}&segment_index=${index}`, true, controller.signal);
           const decoded = decodeDanmaku(buffer);
           if (decoded.state === 1) break;

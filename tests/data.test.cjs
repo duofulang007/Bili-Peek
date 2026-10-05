@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { decodeDanmaku, density, wordStats, parsePageState } = require('../Bili-Peek.user.js');
+const { decodeDanmaku, density, wordStats, parsePageState, formatTime } = require('../Bili-Peek.user.js');
 function vi(value) { value=BigInt(value); const bytes=[]; do {bytes.push(Number(value&127n)|(value>127n?128:0)); value>>=7n;}while(value); return Buffer.from(bytes); }
 function f(n,value,string=false) {const b=Buffer.isBuffer(value)?value:Buffer.from(String(value)); return string?Buffer.concat([vi(n*8+2),vi(b.length),b]):Buffer.concat([vi(n*8),vi(value)]);}
 test('read only matching page metadata without evaluating trailing scripts or quoted braces',()=>{
@@ -65,7 +65,7 @@ test('tooltip samples keep three distinct matching originals, including the fina
   assert.deepEqual(density(rows, 160).bins[0].samples, ['ＡＢＣ 内存', '其他', 'abc第二']);
 });
 
-test('tooltip samples stay available for sparse bins and cap at twenty distinct originals',()=>{
+test('tooltip samples stay available for sparse bins and retain only three distinct originals',()=>{
   // The hover detail must not go blank just because a bucket holds few messages.
   const rows = [
     { time: 10, text: '稀疏桶唯一一条', mode: 1 },
@@ -75,12 +75,34 @@ test('tooltip samples stay available for sparse bins and cap at twenty distinct 
   const data = density(rows, 160);
   assert.deepEqual(data.bins[10].samples, ['稀疏桶唯一一条']);
   assert.deepEqual(data.bins[11].samples, []);
-  assert.equal(data.bins[30].pool.length, 20, '池上限 20，避免为悬停保留过多文本');
-  assert.equal(data.bins[30].samples.length, 3, '悬停只展示前三条，且不破坏原有断言口径');
+  assert.equal(data.bins[30].samples.length, 3, '只保留悬停实际展示的三条原文');
   assert.deepEqual(data.bins[30].samples, ['密集0', '密集1', '密集2']);
-  // Duplicate text must not consume pool slots twice.
+  // Duplicate text must not consume sample slots twice.
   const repeated = density([{ time: 0, text: '重复', mode: 1 }, { time: 0, text: '重复', mode: 1 }, { time: 0, text: '另一条', mode: 1 }], 160);
-  assert.deepEqual(repeated.bins[0].pool, ['重复', '另一条']);
+  assert.deepEqual(repeated.bins[0].samples, ['重复', '另一条']);
+});
+
+test('hover uses precomputed samples, labels nearby originals and includes the final boundary', () => {
+  const vm = require('node:vm');
+  const source = require('node:fs').readFileSync(require.resolve('../Bili-Peek.user.js'), 'utf8');
+  const data = density([
+    { time: 0, text: '内存原文', mode: 1 },
+    { time: 160, text: '内存末尾', mode: 1 },
+  ], 160, '内存');
+  const tooltip = { replaceChildren(...nodes) { this.nodes = nodes; } };
+  const state = vm.createContext({
+    chartData: data, videoDuration: 160, selectedTerm: '内存', formatTime,
+    document: { createElement: () => ({}) },
+    ui: { tooltip, density: { querySelector: () => null } },
+    records: new Proxy([], { get() { throw new Error('hover must not access records'); } }),
+  });
+  vm.runInContext(source.slice(source.indexOf('  function showTooltip('), source.indexOf('  function request(')), state);
+  for (const [time, samples] of [[0, ['内存原文']], [1, ['邻近 0:00：内存原文']], [2, []], [160, ['内存末尾']]]) {
+    state.showTooltip(time);
+    assert.ok(tooltip.nodes[0].textContent.includes(formatTime(Math.min(time, 159))));
+    assert.deepEqual(tooltip.nodes.slice(1).map(node => node.textContent), samples);
+    assert.equal(tooltip.hidden, false);
+  }
 });
 
 test('nested phrases with different counts survive and cached results preserve repeated messages',()=>{

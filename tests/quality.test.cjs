@@ -1,6 +1,73 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { qualityFromLabel, selectQualityStream, selectMediaUrl, downloadQualities, defaultDownloadQuality } = require('../Bili-Peek.user.js');
+const { selectQualityStream, selectMediaUrl, downloadQualities, defaultDownloadQuality } = require('../Bili-Peek.user.js');
+
+test('save opens editable metadata before helper/media resolve, preserves edits on retry and ignores completion after cancel', async () => {
+  const source = require('node:fs').readFileSync(require.resolve('../Bili-Peek.user.js'), 'utf8');
+  const vm = require('node:vm');
+  let nodes = {};
+  class Node {
+    constructor() { this.value = ''; this.children = []; this.listeners = {}; this.parentElement = this; this.isConnected = false; }
+    addEventListener(type, fn) { this.listeners[type] = fn; }
+    append(node) { this.children.push(node); }
+    after() {}
+    setAttribute() {}
+    setCustomValidity() {}
+    focus() {}
+    select() {}
+    showModal() { this.open = true; }
+    close() { this.open = false; }
+    remove() { this.isConnected = false; }
+    replaceChildren() { this.children = []; }
+    set id(value) { nodes['#' + value] = this; }
+    querySelector(selector) { return nodes[selector] ||= new Node(); }
+    click() { return this.listeners.click?.({ preventDefault() {} }); }
+  }
+  let dialog, releaseHealth, releaseMedia, attempts = 0;
+  const state = {
+    document: { title: '测试视频', createElement(type) { const node = new Node(); if (type === 'dialog') { dialog = node; nodes = {}; } return node; } },
+    host: { shadowRoot: { append(node) { node.isConnected = true; } } },
+    ui: Object.fromEntries(['jump-start', 'clip-start', 'jump-end', 'clip-end', 'range-start', 'range-end', 'range-window', 'save-clip'].map(id => [id, new Node()])),
+    currentRoute: 'BVtest:p1', location: { href: 'BVtest:p1' }, routeKey: value => value,
+    clipRange: { start: 0, end: 30 }, exportingRoutes: new Set(), exportDrafts: new Map(),
+    commitClipInputs: () => true, updateClipUI() {}, savedValue: () => 'token', status() {},
+    helperRequest: () => new Promise(resolve => { releaseHealth = resolve; }),
+    loadExportMedia: () => { attempts++; return new Promise((resolve, reject) => { releaseMedia = { resolve, reject }; }); },
+    formatTime: String, defaultDownloadQuality, GM_getValue: () => [], GM_setValue() {},
+    transferStates: new Map()
+  };
+  vm.createContext(state);
+  vm.runInContext(source.slice(source.indexOf('  function bindClipControls('), source.indexOf('  function helperRequest(')), state);
+  state.bindClipControls();
+  const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
+  const saving = state.ui['save-clip'].click();
+  assert.ok(dialog?.open, 'dialog must open in the click handler before the health request resolves');
+  assert.equal(dialog.querySelector('#export-confirm').disabled, true);
+  const tags = dialog.querySelector('#export-tags'), summary = dialog.querySelector('#export-summary');
+  tags.value = '学习'; summary.value = '先写的摘要';
+  dialog.listeners.input();
+  releaseHealth({ ready: true, segmentAvailable: true }); await flush();
+  releaseMedia.reject(new Error('画质请求失败')); await flush();
+  assert.ok(dialog.open);
+  assert.equal(dialog.querySelector('#export-confirm').disabled, true);
+  assert.equal(dialog.querySelector('#export-quality-retry').hidden, false);
+  assert.match(dialog.querySelector('#export-quality-status').textContent, /画质请求失败/);
+  dialog.querySelector('#export-quality-retry').click();
+  releaseHealth({ ready: true, segmentAvailable: true }); await flush();
+  releaseMedia.resolve({ qualities: [{ id: 80, label: '1080P' }] }); await flush();
+  assert.equal(attempts, 2);
+  assert.equal(dialog.querySelector('#export-confirm').disabled, false);
+  assert.equal(tags.value, '学习'); assert.equal(summary.value, '先写的摘要');
+  assert.equal(dialog.querySelector('#export-quality').value, '80');
+  dialog.querySelector('#export-cancel').click(); await saving;
+  const cancelled = state.ui['save-clip'].click();
+  const closed = dialog;
+  dialog.querySelector('#export-cancel').click(); await cancelled;
+  releaseHealth({ ready: true }); await flush();
+  releaseMedia.resolve({ qualities: [{ id: 64, label: '720P' }] }); await flush();
+  assert.equal(closed.isConnected, false); assert.equal(closed.open, false);
+  assert.equal(state.exportingRoutes.size, 0);
+});
 
 test('download choices use actual safe tracks, default to 1080P or highest available, and ignore advertised locked qualities', () => {
   const stream = id => ({ id, baseUrl: 'https://test.bilivideo.com/' + id });
@@ -62,18 +129,23 @@ test('prepareExport selects safe backup URLs from the same tracks before helper 
   assert.notEqual(require('../helper/export.cjs').keyFor(task), require('../helper/export.cjs').keyFor({ ...task, downloadQuality: 64 }));
 });
 
-test('recognize selected quality including frame rate and high bitrate variants', () => {
-  for (const [label, quality] of [['360P 流畅', 16], ['480P 清晰', 32], ['720P 高清', 64], ['720P 60帧', 74], ['1080P 高清', 80], ['1080P 高码率', 112], ['1080P 60帧', 116], ['4K 超清', 120], ['HDR 真彩', 125]]) {
-    assert.equal(qualityFromLabel(label), quality);
-  }
-  assert.equal(qualityFromLabel('自动'), null);
-  assert.equal(qualityFromLabel(''), null);
-});
-
 test('use exactly selected quality and never substitute lower or higher quality', () => {
   const streams = [{ id: 64, codecs: 'avc1' }, { id: 80, codecs: 'hev1' }, { id: 120, codecs: 'avc1' }, { id: 80, codecs: 'avc1' }];
   assert.equal(selectQualityStream(streams, 80), streams[3]);
   assert.equal(selectQualityStream(streams, 120), streams[2]);
   assert.equal(selectQualityStream(streams, 116), undefined);
   assert.equal(selectQualityStream([streams[1]], 80), streams[1]);
+});
+
+test('keep the runtime version single-sourced so the panel never reports a stale build', () => {
+  const fs = require('node:fs');
+  const source = fs.readFileSync(require.resolve('../Bili-Peek.user.js'), 'utf8');
+  const meta = /^\/\/ @version\s+(\S+)/m.exec(source)?.[1];
+  const runtime = /const SCRIPT_VERSION = '([^']+)'/.exec(source)?.[1];
+  const pkg = JSON.parse(fs.readFileSync(require.resolve('../package.json'), 'utf8')).version;
+  // @version / SCRIPT_VERSION / package.json 必须一致，否则报错信息里的版本会撒谎。
+  assert.equal(runtime, meta, 'SCRIPT_VERSION 与 @version 不一致');
+  assert.equal(pkg, meta, 'package.json 与 @version 不一致');
+  // 硬编码字面量赋值是本 bug 的来源，禁止回归。
+  assert.doesNotMatch(source, /host\.dataset\.version = '\d/, 'dataset.version 必须走 SCRIPT_VERSION');
 });

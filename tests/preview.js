@@ -19,6 +19,7 @@ document.getElementById('run-tests').addEventListener('click', async () => {
   const ui = id => panel().shadowRoot.getElementById(id);
   const confirmSave = async (checkRequired = false) => {
     await until(() => ui('export-dialog'), '保存前未打开表单');
+    await until(() => !ui('export-confirm').disabled, '保存画质读取未完成');
     if (checkRequired) {
       ui('export-confirm').click();
       expect(Boolean(ui('export-dialog')) && !ui('export-tags').checkValidity(), '标签为空时无法提交保存');
@@ -157,7 +158,10 @@ document.getElementById('run-tests').addEventListener('click', async () => {
     await part(1); await until(()=>loaded(),'恢复第一 P 未完成');
     window.fixtureExport = 'success'; GM_setValue('export-token', 'a'.repeat(64));
     ui('save-clip').click();
-    await until(() => ui('export-quality'), '未显示下载画质');
+    expect(Boolean(ui('export-dialog')) && ui('export-quality').disabled && ui('export-confirm').disabled, '点击保存立即打开表单，画质后台读取');
+    ui('export-tags').value = '加载时写标签'; ui('export-summary').value = '加载时写摘要';
+    await until(() => ui('export-quality') && !ui('export-quality').disabled, '未显示下载画质');
+    expect(ui('export-tags').value === '加载时写标签' && ui('export-summary').value === '加载时写摘要', '画质读取完成保留正在编辑的标签和摘要');
     expect(ui('export-quality').value === '80' && ui('export-quality').options.length === 4, '实际可下载画质列表默认 1080P，不跟随播放器画质');
     ui('export-quality').value = '64'; ui('export-quality').dispatchEvent(new Event('input', { bubbles: true }));
     await confirmSave();
@@ -233,7 +237,7 @@ document.getElementById('run-tests').addEventListener('click', async () => {
     expect(!ui('export-dialog') && window.fixtureLatestClip.videoOnly === true && window.fixtureLatestClip.subtitles.length === 0, '无字幕自动保存视频并注明，不弹额外确认');
     window.fixtureNoSubtitles = false;
     window.fixtureDownloadQualities = [64, 32];
-    ui('save-clip').click(); await until(() => ui('export-quality'), '缺少 1080P 时未显示画质列表');
+    ui('save-clip').click(); await until(() => ui('export-quality') && !ui('export-quality').disabled, '缺少 1080P 时未显示画质列表');
     expect(ui('export-quality').value === '64' && ui('export-quality').options.length === 2, '原视频没有 1080P 时默认实际可下载的最高画质');
     await confirmSave(); await until(() => ui('transfer-detail').textContent.includes('已保存'), '最高画质保存未完成');
     expect(window.fixtureLatestClip.downloadQuality === 64, '最高可下载画质与提交轨道一致');

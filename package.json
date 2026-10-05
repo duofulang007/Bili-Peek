@@ -1,6 +1,6 @@
 {
   "name": "bili-peek",
-  "version": "0.3.39",
+  "version": "0.3.43",
   "private": true,
   "description": "Edge / Tampermonkey Bilibili viewing companion",
   "scripts": {

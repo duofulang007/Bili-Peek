@@ -1,5 +1,5 @@
 // Test runs create throwaway vaults under tests/export-sandbox and download
-// fragments under .local/segment-cache. Neither is cleaned up by the tests
+// fragments under tests/export-sandbox. Neither is cleaned up by the tests
 // themselves, so repeated runs grow the working tree by hundreds of MB.
 // Called by tests/run-tests.cjs after the suite, and runnable on its own via
 // `npm run clean`.
@@ -7,7 +7,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 
 const root = path.resolve(__dirname, '..');
-const targets = ['tests/export-sandbox', '.local/segment-cache'];
+const targets = ['tests/export-sandbox'];
 
 async function cleanSandbox() {
   for (const relative of targets) {

@@ -126,6 +126,13 @@ test('real helper: automatic pairing, origin/auth checks, replay/expiry rejectio
   }
   try {
     await start();
+    const idleCache = path.join(directory, 'segment-cache', 'f'.repeat(64));
+    await fs.mkdir(idleCache, { recursive: true });
+    await fs.writeFile(path.join(idleCache, 'init.bin'), 'keep active helper cache');
+    await fs.utimes(idleCache, new Date(0), new Date(0));
+    const duplicate = require('node:child_process').spawnSync(process.execPath, [path.resolve(__dirname, '../helper/server.cjs')], { env: { ...process.env, BILI_PEEK_CONFIG: configPath }, windowsHide: true, encoding: 'utf8' });
+    assert.equal(duplicate.status, 1, 'duplicate helper cannot acquire the serving port');
+    assert.equal(await fs.readFile(path.join(idleCache, 'init.bin'), 'utf8'), 'keep active helper cache', 'duplicate startup must not prune the existing helper cache');
     assert.equal((await request('/health')).status, 401);
     assert.equal(Number(await fs.readFile(path.join(directory, 'helper.pid'), 'utf8')), child.pid);
     const url = await preparePairing(config, directory);
@@ -147,6 +154,7 @@ test('real helper: automatic pairing, origin/auth checks, replay/expiry rejectio
     assert.equal((await request('/health', auth)).body.ready, true);
     assert.equal(await preparePairing(config, directory), null, 'an already connected browser must not be opened again');
     await stop(); await start();
+    await assert.rejects(fs.access(idleCache), { code: 'ENOENT' }, 'real startup automatically removes expired cache');
     assert.equal((await request('/health', auth)).body.ready, true, 'saved pairing still works after a process restart');
     assert.equal(JSON.parse(await fs.readFile(configPath, 'utf8')).token, config.token);
     await fs.writeFile(path.join(directory, 'browser-paired.json'), '{}');

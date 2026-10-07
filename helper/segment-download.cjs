@@ -4,6 +4,7 @@ const fs = require('node:fs/promises');
 const { createReadStream } = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { cacheManager } = require('./segment-cache.cjs');
 const sourceHealth = new Map();
 function downloadThreads(name, duration, pending, override) {
   const bytes = pending.reduce((n, item) => n + Math.max(0, item.size - (item.partialBytes || 0)), 0);
@@ -166,9 +167,11 @@ async function downloadTracks(task, config, runner, onProgress, control, routes,
   const inflight = new Map(), downloads = new Map();
   const nonce = crypto.randomBytes(24).toString('hex');
   const prefix = `/segments/${nonce}`;
-  const cacheRoot = path.resolve(__dirname, '../.local/segment-cache');
   const tracks = [];
-  for (const name of ['video', 'audio']) {
+  const leases = [], manager = cacheManager(config);
+  try {
+  let prepareFailure;
+  const prepareTrack = async (name, trackIndex) => {
     await control.wait();
     const descriptor = task[`${name}Track`];
     if (!descriptor) throw new Error('网页未提供轨道索引，请刷新新版脚本；本次分片试验未启动');
@@ -177,7 +180,7 @@ async function downloadTracks(task, config, runner, onProgress, control, routes,
     onProgress({ stage: 'source', canPause: false });
     for (const url of urls) {
       try { metadata = await loadMetadata(url, init, range, fetcher, control, n => { received += n; }); break; }
-      catch (error) { await control.wait(); metadataError = error; }
+      catch (error) { await control.wait(); if (prepareFailure) throw prepareFailure; metadataError = error; }
     }
     if (!metadata) throw new Error(`轨道初始化读取失败：${cleanError(metadataError || new Error('没有合法下载地址'))}`);
     const { buffer, initBuffer, url } = metadata;
@@ -187,10 +190,12 @@ async function downloadTracks(task, config, runner, onProgress, control, routes,
     const selected = selectSegments(index, (task.cutMode === 'keyframe' && name === 'audio' ? tracks[0].cutStart : task.start) + origin, task.end + origin);
     // Cache identity includes the source init and index, not expiring signed URLs.
     const identity = crypto.createHash('sha256').update(JSON.stringify(['ranges-v2', task.id, task.cid, name, descriptor.codec])).update(buffer).update(initBuffer).digest('hex');
-    const cache = path.join(cacheRoot, identity); await fs.mkdir(cache, { recursive: true });
     const items = [{ ...init, name: 'init', seed: initBuffer }, ...selected.map(s => ({ ...s, name: String(s.offset) }))];
+    const lease = await manager.acquire(identity, items.reduce((sum, item) => sum + item.size + 512, 0), work);
+    leases.push(lease);
+    const cache = lease.directory;
     const track = { name, url, items, cache, selected, origin, cutStart: selected[0].start - origin, sourceEnd: index.end - origin, source: path.join(work, `${name}.mp4`), sources: [{ url, bytesPerSecond: 0 }], sourceIndex: 0, switches: 0, usedSources: new Set([url]) };
-    tracks.push(track);
+    tracks[trackIndex] = track;
     for (const item of items) {
       item.file = path.join(cache, `${item.name}.bin`); item.done = false;
       try {
@@ -212,10 +217,20 @@ async function downloadTracks(task, config, runner, onProgress, control, routes,
       delete item.seed;
     }
     const missing = items.find(item => item.name !== 'init' && !item.done);
+    if (prepareFailure) throw prepareFailure;
     if (missing && urls.length > 1) {
       track.sources = await rankSources(urls, metadata, init, range, missing, fetcher, control, n => { received += n; });
       track.url = track.sources[0].url; track.usedSources = new Set([track.url]);
     }
+  };
+  if (task.cutMode === 'keyframe') {
+    for (const [i, name] of ['video', 'audio'].entries()) await prepareTrack(name, i);
+  } else {
+    await Promise.allSettled(['video', 'audio'].map(async (name, i) => {
+      try { await prepareTrack(name, i); }
+      catch (error) { prepareFailure ||= error; for (const c of control.controllers) c.abort(error); throw error; }
+    }));
+    if (prepareFailure) throw prepareFailure;
   }
   const total = tracks.reduce((n, t) => n + t.items.reduce((s, i) => s + i.size, 0), 0);
   const preparedAt = performance.now(), mediaBytesAt = received;
@@ -382,6 +397,12 @@ async function downloadTracks(task, config, runner, onProgress, control, routes,
     // Only process-owned generated files, never a user's note or attachment.
     await fs.rm(path.join(work, 'nre'), { recursive: true, force: true });
     for (const name of ['video.m3u8', 'audio.m3u8']) await fs.rm(path.join(work, name), { force: true });
+  }
+  } finally {
+    const released = await Promise.allSettled(leases.map(lease => lease.release()));
+    await fs.rm(path.join(work, 'segment-transient'), { recursive: true, force: true });
+    const failed = released.find(result => result.status === 'rejected');
+    if (failed) console.error('分片缓存维护失败：' + cleanError(failed.reason));
   }
 }
 module.exports = { parseRange, parseSidx, selectSegments, makePlaylist, rangedFetch, downloadTracks, downloadThreads, TransferControl, cleanError, rankSources, loadMetadata, sourceCandidates };

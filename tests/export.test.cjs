@@ -45,11 +45,20 @@ test('only Bilibili media, valid ranges and nonempty subtitles are accepted', ()
   assert.doesNotThrow(() => validateTask({ ...task, subtitles: [], videoOnly: true }));
   const videoOnlyNote = note({ ...task, subtitles: [], videoOnly: true }, [], keyFor(task));
   assert.match(videoOnlyNote, /未保存字幕/); assert.doesNotMatch(videoOnlyNote, /带时间原文|\.srt/);
+  for (const subtitles of [[null], [{ from: 0, to: 1, content: 7 }], [{ from: 2, to: 1, content: '坏时间' }]]) assert.throws(() => validateTask({ ...task, subtitles }), /字幕/);
 });
 test('WBI signing only includes supported parameters and strips reserved symbols', () => {
   const result = new URLSearchParams(signWbi({ key: 'a'.repeat(64), params: { bvid: "BV1!'xx411c7mD", cid: 123, injected: 'no' } }));
   assert.equal(result.get('bvid'), 'BV1xx411c7mD'); assert.equal(result.has('injected'), false);
   assert.match(result.get('w_rid'), /^[a-f0-9]{32}$/);
+});
+test('clip ranges have no fixed duration or absolute end-time cap but reject invalid timestamps', () => {
+  for (const [start, end] of [[0, 1801], [0, 7200], [0, 46800], [45000, 50000]]) {
+    assert.doesNotThrow(() => validateTask({ ...task, start, end }));
+  }
+  for (const [start, end] of [[-1, 7200], [7200, 7200], [7200, 1], [NaN, 7200], [0, Infinity], [0, NaN], ['0', 7200]]) {
+    assert.throws(() => validateTask({ ...task, start, end }), /截取范围无效/);
+  }
 });
 test('second-level duration tolerance retains proven source-ending notes and rejects missing tracks', () => {
   const probe = { format: { duration: '12.565333' }, streams: [{ codec_type: 'video', avg_frame_rate: '30/1' }, { codec_type: 'audio' }] };
@@ -78,10 +87,30 @@ test('second-level tolerance still rejects known truncated or misaligned tracks'
   assert.equal(mediaCheck({ ...probe, streams: [probe.streams[0], { ...probe.streams[1], duration: '260' }] }, 262.91).valid, false);
   assert.equal(mediaCheck({ ...probe, streams: [probe.streams[0], { ...probe.streams[1], start_time: '1.5' }] }, 262.91).valid, false);
 });
+test('hardware encoding preserves exact seek and stops on failure instead of changing encoder', async () => {
+  const testRoot = path.join(root, 'tests/export-sandbox'); await fs.mkdir(testRoot, { recursive: true });
+  const vault = await fs.mkdtemp(path.join(testRoot, 'encoder-')); await fs.mkdir(path.join(vault, '.obsidian'));
+  const config = { vault, output: path.join(vault, 'notes'), videoEncoder: 'h264_nvenc', nvencQuality: 27 };
+  let calls = 0;
+  await assert.rejects(exportClip(task, config, async (executable, args) => {
+    calls++;
+    assert.equal(args[args.indexOf('-c:v') + 1], 'h264_nvenc');
+    assert.equal(args[args.indexOf('-cq') + 1], '27');
+    assert.equal(args[args.indexOf('-ss') + 1], String(task.start));
+    assert.ok(args.includes('yuv420p'));
+    throw new Error('NVENC device unavailable');
+  }), /NVENC device unavailable/);
+  assert.equal(calls, 1);
+  assert.deepEqual(await fs.readdir(path.join(config.output, 'Bili-Peek附件')), []);
+  assert.equal(await fs.readdir(config.output).then(names => names.some(name => name.endsWith('.md'))), false);
+  await assert.rejects(exportClip(task, { ...config, videoEncoder: 'invalid' }), /编码配置无效/);
+  await assert.rejects(exportClip(task, { ...config, nvencQuality: NaN }), /质量配置无效/);
+});
+
 test('real off-keyframe media cut writes video, subtitles and note once', async () => {
   const testRoot = path.join(root, 'tests/export-sandbox'); await fs.mkdir(testRoot, { recursive: true });
   const vault = await fs.mkdtemp(path.join(testRoot, 'vault-')); await fs.mkdir(path.join(vault, '.obsidian'));
-  const config = { vault, output: path.join(vault, '网页内容'), ffmpeg: path.join(root, '.tools/ffmpeg.exe'), ffprobe: path.join(root, '.tools/ffprobe.exe'), category: '测试片段', tags: ['验证'] };
+  const config = { vault, output: path.join(vault, '网页内容'), ffmpeg: path.join(root, '.tools/ffmpeg.exe'), ffprobe: path.join(root, '.tools/ffprobe.exe'), category: '测试片段', tags: ['验证'], ...(['1', 'full'].includes(process.env.BILI_PEEK_TEST_NVENC) ? { videoEncoder: 'h264_nvenc', hardwareDecode: process.env.BILI_PEEK_TEST_NVENC === 'full' } : {}) };
   const source = path.join(vault, 'source.mp4');
   await run(config.ffmpeg, ['-v', 'error', '-nostdin', '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=25', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '8', '-c:v', 'libx264', '-g', '250', '-c:a', 'aac', source]);
   const localRunner = (executable, args, timeout, onProgress) => {
@@ -94,12 +123,16 @@ test('real off-keyframe media cut writes video, subtitles and note once', async 
   };
   const progress = [];
   const result = await exportClip(task, config, localRunner, update => progress.push(update));
+  assert.equal(result.videoEncoder, config.videoEncoder || 'libx264');
+  assert.equal(result.hardwareDecode, Boolean(config.hardwareDecode));
   assert.deepEqual([...new Set(progress.map(update => update.stage))], ['prepare', 'media', 'probe', 'verify', 'write', 'complete']);
   assert.ok(progress.some(update => update.stage === 'media' && Number.isFinite(update.percent)));
   assert.ok(progress.some(update => update.stage === 'verify' && Number.isFinite(update.percent)));
   assert.ok(result.timings.total >= result.timings.media && Number.isFinite(result.timings.verify));
   assert.ok(Math.abs(result.duration - 1.3) <= .15, `actual duration ${result.duration}`);
   const markdown = await fs.readFile(result.notePath, 'utf8');
+  assert.match(markdown, /^> \[!note\]- 片段字幕$/m);
+  assert.doesNotMatch(markdown, /^## 片段字幕$/m);
   assert.equal(result.filename, '自定义笔记.md');
   assert.match(markdown, /tags: \["测试"\]/);
   assert.match(markdown, /summary: "这是一段简介"/);
@@ -141,4 +174,11 @@ test('real off-keyframe media cut writes video, subtitles and note once', async 
     await fs.writeFile(args.at(-1), 'partial'); throw new Error('模拟失败');
   }), /模拟失败/);
   assert.equal((await fs.readdir(path.join(config.output, 'Bili-Peek附件'))).some(name => name.startsWith('.pending-')), false);
+  const packets = JSON.parse(await run(config.ffprobe, ['-v', 'error', '-select_streams', 'v:0', '-show_packets', '-show_entries', 'packet=pos,size', '-of', 'json', source])).packets;
+  const corrupt = await fs.readFile(source), offset = Number(packets[Math.floor(packets.length / 2)].pos);
+  corrupt.writeUInt32BE(0xffffffff, offset);
+  const broken = path.join(vault, 'corrupt.mp4'); await fs.writeFile(broken, corrupt);
+  for (const decode of [[], ...(config.hardwareDecode ? [['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda']] : [])]) {
+    await assert.rejects(run(config.ffmpeg, ['-v', 'error', '-xerror', '-nostdin', ...decode, '-i', broken, '-f', 'null', '-']), /媒体处理失败/);
+  }
 });

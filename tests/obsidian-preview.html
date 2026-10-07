@@ -1,32 +1,73 @@
-<!doctype html><meta charset="utf-8"><style>body{margin:0;background:#19191b;color:#ddd;font:16px/1.7 system-ui;--text-muted:#999;--text-accent:#829eed;--background-primary:#202023;--background-modifier-border:#39393d}.markdown-preview-view{max-width:850px;margin:auto;padding:24px}h1{font-size:22px}h2{font-size:18px}.markdown-rendered button.bili-peek-time {
-  background: transparent; border: 0; box-shadow: none; padding: 2px 0;
-  height: auto; font: inherit; font-weight: 600; color: var(--text-muted);
-  cursor: pointer; font-variant-numeric: tabular-nums;
+<!doctype html><meta charset="utf-8"><title>观看工作台模拟布局</title><style>body{margin:0;background:#19191b;color:#ddd;font:16px/1.7 system-ui;--text-normal:#ddd;--text-muted:#999;--interactive-accent:#4868b2;--text-on-accent:#fff;--background-secondary:#292933;--background-modifier-hover:#27272b}main{height:85vh}button,input,textarea{color:inherit;background:#252529;border:1px solid #444}textarea{box-sizing:border-box}.view-content.bili-peek-workbench { padding: 12px; overflow: hidden; container: bili-workbench / inline-size; }
+.bili-peek-wb { height: 100%; min-height: 0; display: flex; flex-direction: column; gap: 10px; color: var(--text-normal); }
+.bili-peek-wb [hidden] { display: none !important; }
+.bili-peek-toolbar { display: flex; flex: none; align-items: center; flex-wrap: wrap; gap: 6px; }
+.bili-peek-toolbar button, .bili-peek-toolbar select, .bili-peek-size summary { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 30px; min-height: 30px; padding: 0 9px; font-size: 13px; border-radius: 5px; }
+.bili-peek-toolbar button { box-shadow: none; }
+.bili-peek-toolbar button[aria-pressed="true"] { background: var(--interactive-accent); color: var(--text-on-accent); }
+.bili-peek-icon { display: inline-flex; flex: none; }
+.bili-peek-icon svg { width: 15px; height: 15px; }
+.bili-peek-toolbar button.bili-peek-icon-button { width: 30px; padding: 0; }
+.bili-peek-toolbar button:active { transform: scale(.97); }
+.bili-peek-wb :is(button, select, summary, input):focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
+.bili-peek-main-tools { padding-bottom: 2px; }
+.bili-peek-main-tools > .bili-peek-icon-button { margin-left: auto; }
+.bili-peek-size { position: relative; }
+.bili-peek-size summary { cursor: pointer; list-style: none; color: var(--text-muted); }
+.bili-peek-size summary::-webkit-details-marker { display: none; }
+.bili-peek-size summary:hover { background: var(--background-modifier-hover); }
+.bili-peek-size-panel { position: absolute; top: 36px; left: 0; z-index: 5; width: 230px; padding: 14px; background: var(--background-primary); border: 1px solid var(--background-modifier-border); border-radius: 6px; box-shadow: 0 6px 20px #0004; }
+.bili-peek-size-panel label { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 13px; }
+.bili-peek-size-panel input { width: 100%; margin: 0; }
+.bili-peek-layout { flex: 1; min-height: 0; display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr) minmax(300px, calc(100% - var(--bili-video-share, 58%) - 12px)); grid-template-rows: minmax(0, 1fr); }
+.bili-peek-media { grid-column: 1; grid-row: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.bili-peek-media-status { color: var(--text-muted); font-size: 13px; }
+.bili-peek-media-status:empty { display: none; }
+.bili-peek-media video { display: block; width: auto; height: auto; max-width: 100%; max-height: 70vh; object-fit: contain; margin: 0; background: #000; }
+.bili-peek-captions, .bili-peek-notes { display: flex; min-width: 0; min-height: 0; flex-direction: column; gap: 8px; }
+.bili-peek-captions { grid-column: 2; grid-row: 1; }
+.bili-peek-caption-tools { flex-wrap: nowrap; }
+.bili-peek-caption-tools > button:first-child { margin-right: auto; justify-content: flex-start; padding-left: 0; background: transparent; border: 0; color: var(--text-normal); }
+.bili-peek-caption-tools select { max-width: 100px; padding: 0 6px; }
+.bili-peek-caption-tools input.bili-peek-caption-search { box-sizing: border-box; width: 134px; min-width: 64px; flex: 0 1 180px; height: 30px; padding: 0 8px; font-size: 13px; border-radius: 5px; }
+.bili-peek-caption-body { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.bili-peek-notes { display: none; }
+.bili-peek-note-title { margin-right: auto; font-size: 14px; }
+.bili-peek-transcript { position: relative; flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.bili-peek-origin, .bili-peek-note-status { color: var(--text-muted); font-size: 12px; line-height: 1.5; }
+.bili-peek-origin:empty, .bili-peek-note-status:empty { display: none; }
+.bili-peek-empty { margin: 10px 0; line-height: 1.7; }
+.bili-peek-wb button.bili-peek-cue { display: grid; grid-template-columns: 58px minmax(0, 1fr); align-items: start; gap: 8px; width: 100%; height: auto; min-height: 40px; margin: 0; padding: 10px 8px; text-align: left; font: inherit; font-weight: normal; background: transparent; border: 0; border-bottom: 1px solid var(--background-modifier-border); border-radius: 0; box-shadow: none; }
+.bili-peek-wb button.bili-peek-cue:hover { background: var(--background-modifier-hover); }
+.bili-peek-wb button.bili-peek-cue[aria-current="true"] { background: var(--background-secondary); box-shadow: inset 2px 0 var(--interactive-accent); }
+.bili-peek-time { text-align: left; color: var(--text-muted); font-size: 12px; line-height: 1.8; font-variant-numeric: tabular-nums; }
+.bili-peek-cue-text { text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 15px; line-height: 1.7; }
+.bili-peek-cue-text mark.bili-peek-search-match { background: #f5ce62; color: #251b00; border-radius: 2px; padding: 0; }
+.bili-peek-wb[data-mode="write"] .bili-peek-layout { grid-template-rows: auto minmax(0, 1fr); }
+.bili-peek-wb[data-mode="write"] .bili-peek-media video { max-height: 48vh; }
+.bili-peek-wb[data-mode="write"] .bili-peek-captions { grid-column: 1; grid-row: 2; }
+.bili-peek-wb[data-mode="write"] .bili-peek-notes { display: flex; grid-column: 2; grid-row: 1 / span 2; }
+.bili-peek-notes textarea { flex: 1; min-height: 0; width: 100%; resize: none; font-size: 15px; line-height: 1.7; padding: 12px; border-color: var(--background-modifier-border); background: var(--background-primary); }
+.bili-peek-open { margin: 8px 0; }
+@container bili-workbench (max-width: 1000px) {
+  .bili-peek-layout { grid-template-columns: minmax(0, 1fr) minmax(280px, calc(100% - var(--bili-video-share, 58%) - 12px)); }
 }
-.markdown-rendered button.bili-peek-time:hover,
-.markdown-rendered button.bili-peek-time.is-selected { color: var(--text-accent); }
-.markdown-rendered button.bili-peek-time:focus-visible {
-  outline: 2px solid var(--text-accent); outline-offset: 3px; border-radius: 3px;
+@container bili-workbench (max-width: 720px) {
+  .bili-peek-wb { overflow-y: auto; }
+  .bili-peek-layout, .bili-peek-wb[data-mode="write"] .bili-peek-layout { display: flex; flex-direction: column; flex: none; }
+  .bili-peek-media { flex: none; }
+  .bili-peek-media video, .bili-peek-wb[data-mode="write"] .bili-peek-media video { max-height: 38vh; }
+  .bili-peek-captions { flex: none; }
+  .bili-peek-transcript { max-height: 40vh; flex: none; }
+  .bili-peek-wb[data-mode="write"] .bili-peek-notes { min-height: 250px; }
+  .bili-peek-notes textarea { min-height: 220px; }
+  .bili-peek-size-panel { left: auto; right: 0; }
 }
-.markdown-rendered .bili-peek-original { display: none !important; }
-.markdown-rendered .bili-peek-reader {
-  display: flex; flex-direction: column; height: min(72vh, 760px); min-height: 280px;
-  border: 1px solid var(--background-modifier-border); border-radius: 8px;
-  overflow: hidden; background: var(--background-primary); margin: 14px 0 24px;
-}
-.markdown-rendered .bili-peek-reader > video {
-  flex: none; display: block; width: 100%; height: min(32vh, 320px); min-height: 100px;
-  object-fit: contain; margin: 0; background: #000; border-radius: 0;
-}
-.markdown-rendered .bili-peek-transcript {
-  flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
-  padding: 18px 22px; scrollbar-gutter: stable; line-height: 1.8;
-}
-.markdown-rendered .bili-peek-paragraph { margin-bottom: 22px; }
-.markdown-rendered .bili-peek-paragraph:last-child { margin-bottom: 0; }
-.markdown-rendered .bili-peek-paragraph p { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-@media (max-width: 480px) { .markdown-rendered .bili-peek-transcript { padding: 14px 16px; } }
-</style><main class="markdown-preview-view markdown-rendered"><h1>视频片段笔记 · 本地布局验收</h1><div id="section"><h2>片段字幕</h2></div></main><script>let module={exports:{}};let processor;const require=()=>({Plugin:class{registerMarkdownPostProcessor(fn){processor=fn}registerDomEvent(doc,type,fn){doc.addEventListener(type,fn)}},Notice:class{constructor(text){console.log(text)}}});const { Plugin, Notice } = require('obsidian');
+</style><p>模拟布局，仅供设计预览，不能替代 Obsidian 验收。</p><main class="view-content"></main><script>
+let module={exports:{}}, factory; const app={vault:{cachedRead:async()=>"![[Bili-Peek附件/aaaaaaaaaaaaaaaaaaaa.mp4]]\n\n> [!note]- 片段字幕\n> **00:00**\n> \n> 第 1 段字幕。保留原始措辞，字幕独立滚动。\n> \n> **00:05**\n> \n> 第 2 段字幕。保留原始措辞，字幕独立滚动。\n> \n> **00:10**\n> \n> 第 3 段字幕。保留原始措辞，字幕独立滚动。\n> \n> **00:15**\n> \n> 第 4 段字幕。保留原始措辞，字幕独立滚动。\n> \n> **00:20**\n> \n> 第 5 段字幕。保留原始措辞，字幕独立滚动。\n> \n> **00:25**\n> \n> 第 6 段字幕。保留原始措辞，字幕独立滚动。\n> \n> **00:30**\n> \n> 第 7 段字幕。保留原始措辞，字幕独立滚动。\n> \n> **00:35**\n> \n> 第 8 段字幕。保留原始措辞，字幕独立滚动。\n> \n> **00:40**\n> \n> 第 9 段字幕。保留原始措辞，字幕独立滚动。\n> \n> **00:45**\n> \n> 第 10 段字幕。保留原始措辞，字幕独立滚动。\n> \n> **00:50**\n> \n> 第 11 段字幕。保留原始措辞，字幕独立滚动。\n> \n> **00:55**\n> \n> 第 12 段字幕。保留原始措辞，字幕独立滚动。\n> \n> **01:00**\n> \n> 第 13 段字幕。保留原始措辞，字幕独立滚动。\n> \n> **01:05**\n> \n> 第 14 段字幕。保留原始措辞，字幕独立滚动。\n> \n> **01:10**\n> \n> 第 15 段字幕。保留原始措辞，字幕独立滚动。\n> \n> **01:15**\n> \n> 第 16 段字幕。保留原始措辞，字幕独立滚动。\n> \n> **01:20**\n> \n> 第 17 段字幕。保留原始措辞，字幕独立滚动。\n> \n> **01:25**\n> \n> 第 18 段字幕。保留原始措辞，字幕独立滚动。\n> \n> **01:30**\n> \n> 第 19 段字幕。保留原始措辞，字幕独立滚动。\n> \n> **01:35**\n> \n> 第 20 段字幕。保留原始措辞，字幕独立滚动。\n> \n> **01:40**\n> \n> 第 21 段字幕。保留原始措辞，字幕独立滚动。\n> \n> **01:45**\n> \n> 第 22 段字幕。保留原始措辞，字幕独立滚动。\n> \n> **01:50**\n> \n> 第 23 段字幕。保留原始措辞，字幕独立滚动。\n> \n> **01:55**\n> \n> 第 24 段字幕。保留原始措辞，字幕独立滚动。\n> \n> **02:00**\n> \n> 第 25 段字幕。保留原始措辞，字幕独立滚动。\n> \n> **02:05**\n> \n> 第 26 段字幕。保留原始措辞，字幕独立滚动。\n> \n> **02:10**\n> \n> 第 27 段字幕。保留原始措辞，字幕独立滚动。\n> \n> **02:15**\n> \n> 第 28 段字幕。保留原始措辞，字幕独立滚动。\n> \n> **02:20**\n> \n> 第 29 段字幕。保留原始措辞，字幕独立滚动。\n> \n> **02:25**\n> \n> 第 30 段字幕。保留原始措辞，字幕独立滚动。\n\n## 我的笔记\n\n",getAbstractFileByPath:()=>({path:'preview.md',basename:'示例',extension:'md'}),getResourcePath:()=>location.origin+'/silent.wav',getFiles:()=>[],getMarkdownFiles:()=>[],on:()=>{},process:async()=>{}},metadataCache:{getFirstLinkpathDest:()=>({name:'aaaaaaaaaaaaaaaaaaaa.mp4',path:'Bili-Peek附件/aaaaaaaaaaaaaaaaaaaa.mp4'})},workspace:{on:()=>{},onLayoutReady:()=>{},getLeavesOfType:()=>[]}};
+const require=()=>({Plugin:class{async loadData(){return null}async saveData(){}registerView(t,f){factory=f}addCommand(){}registerEvent(){}registerMarkdownPostProcessor(){}},ItemView:class{constructor(){this.app=app;this.contentEl=document.querySelector('main')}registerDomEvent(el,t,fn,o){el.addEventListener(t,fn,o)}},MarkdownRenderChild:class{},Notice:class{constructor(t){console.log(t)}}});
+const { Plugin, ItemView, Notice, setIcon } = require('obsidian');
+const VIEW = 'bili-peek-workbench';
 
 function seconds(text) {
   if (!/^\d{2,}:\d{2}(?::\d{2})?$/.test(text)) return null;
@@ -34,113 +75,418 @@ function seconds(text) {
   if (parts.slice(1).some(n => n > 59)) return null;
   return parts.reduce((total, n) => total * 60 + n, 0);
 }
-
+function stamp(time) {
+  const value = Math.max(0, Math.floor(time));
+  return [Math.floor(value / 3600), Math.floor(value / 60) % 60, value % 60].map(n => String(n).padStart(2, '0')).join(':');
+}
 function seek(video, time) {
-  if (!Number.isFinite(video.duration) || video.duration <= 0 || time > video.duration) return false;
-  const paused = video.paused;
-  video.currentTime = time;
+  if (!Number.isFinite(video.duration) || video.duration <= 0 || time < 0 || time > video.duration) return false;
+  const paused = video.paused; video.currentTime = time;
   if (paused) video.pause();
   return true;
 }
-
-function paragraphs(source) {
-  const section = source.split('## 片段字幕')[1];
-  if (!section) return [];
-  return [...section.split(/\n## /)[0].matchAll(/\*\*(\d{2,}:\d{2}(?::\d{2})?)\*\*\s*\n([\s\S]*?)(?=\n\*\*\d{2,}:\d{2}(?::\d{2})?\*\*|$)/g)]
+function section(source, heading) {
+  source = source.replace(/\r\n/g, '\n');
+  if (['片段字幕', '语音识别稿'].includes(heading)) {
+    const callout = new RegExp('^> \\[!note\\]- ' + heading + '\\n((?:>[^\\n]*(?:\\n|$))*)', 'm').exec(source);
+    if (callout) return callout[1].replace(/^> ?/gm, '').trim();
+  }
+  return source.replace(/\r\n/g, '\n').split(/^## /m).find(part => part.startsWith(heading + '\n'))?.slice(heading.length).trim() || '';
+}
+function paragraphs(source, heading = '片段字幕') {
+  return [...section(source, heading).matchAll(/\*\*(\d{2,}:\d{2}(?::\d{2})?)\*\*\s*\n([\s\S]*?)(?=\n\*\*\d{2,}:\d{2}(?::\d{2})?\*\*|$)/g)]
     .map(match => ({ label: match[1], time: seconds(match[1]), text: match[2].trim() })).filter(item => item.time !== null && item.text);
 }
-
-function makeReader(items, resource) {
-  const reader = document.createElement('section'); reader.className = 'bili-peek-reader';
-  reader.setAttribute('aria-label', '视频和片段字幕');
-  const video = document.createElement('video'); video.src = resource; video.controls = true; video.preload = 'metadata'; video.playsInline = true;
-  const transcript = document.createElement('div'); transcript.className = 'bili-peek-transcript'; transcript.tabIndex = 0; transcript.setAttribute('aria-label', '片段字幕，独立滚动');
-  for (const item of items) {
-    const paragraph = document.createElement('div'); paragraph.className = 'bili-peek-paragraph';
-    const button = document.createElement('button'); button.type = 'button'; button.className = 'bili-peek-time'; button.textContent = item.label;
-    button.title = `跳转片段到 ${item.label}`; button.dataset.seconds = String(item.time); button.dataset.resource = resource;
-    const text = document.createElement('p'); text.textContent = item.text;
-    paragraph.append(button, text); transcript.append(paragraph);
+function noteInfo(source) {
+  const media = source.match(/!?\[\[(Bili-Peek附件\/[a-f0-9]{20}\.mp4)(?:\|[^\]]+)?\]\]/)?.[1];
+  const header = /^---\r?\n([\s\S]*?)\r?\n---/.exec(source)?.[1] || '';
+  const flag = /^source_has_subtitles:\s*(true|false)\s*$/m.exec(header)?.[1];
+  return { media, sourceHasSubtitles: flag === undefined ? undefined : flag === 'true', original: paragraphs(source), notes: section(source, '我的笔记') };
+}
+function replaceNotes(source, text, previous) {
+  if (section(source, '我的笔记') !== previous) throw new Error('个人笔记已在其他位置修改，草稿已保留，请重新打开后合并。');
+  const block = /^## 我的笔记\s*\r?\n[\s\S]*?(?=^## |$(?![\s\S]))/m;
+  const value = `## 我的笔记\n\n${text.trim()}\n\n`;
+  return block.test(source) ? source.replace(block, () => value) : source.trimEnd() + '\n\n' + value;
+}
+function element(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+function captionMatches(text, query) {
+  const normalize = value => value.normalize('NFKC').toLowerCase().replace(/[\p{P}\p{Z}\s]/gu, '');
+  let content = '', offset = 0; const positions = [], matched = new Set();
+  for (const char of text) {
+    const normalized = normalize(char);
+    for (let index = 0; index < normalized.length; index++) positions.push([offset, offset + char.length]);
+    content += normalized; offset += char.length;
   }
-  reader.append(video, transcript); return reader;
+  const add = index => { const [start, end] = positions[index]; for (let position = start; position < end; position++) matched.add(position); };
+  for (const word of query.trim().split(/\s+/u).map(normalize).filter(Boolean)) {
+    let start = content.indexOf(word);
+    if (start >= 0) {
+      do { for (let index = start; index < start + word.length; index++) add(index); start = content.indexOf(word, start + 1); } while (start >= 0);
+    } else {
+      let position = 0;
+      for (const char of word) { position = content.indexOf(char, position); if (position < 0) return null; for (let index = position; index < position + char.length; index++) add(index); position += char.length; }
+    }
+  }
+  return matched;
+}
+function matchesCaption(text, query) { return captionMatches(text, query) !== null; }
+function highlightCaption(node, text, query, matched) {
+  if (!query) { node.textContent = text; return; }
+  matched ??= captionMatches(text, query);
+  node.replaceChildren();
+  for (let start = 0; start < text.length;) {
+    const highlight = matched?.has(start); let end = start + 1;
+    while (end < text.length && matched?.has(end) === highlight) end++;
+    node.append(highlight ? element('mark', 'bili-peek-search-match', text.slice(start, end)) : document.createTextNode(text.slice(start, end))); start = end;
+  }
+}
+function assetFor(app, media, file) {
+  return media && (app.metadataCache.getFirstLinkpathDest(media, file.path) || app.vault.getAbstractFileByPath((file.parent?.path ? file.parent.path + '/' : '') + media));
+}
+
+class Workbench extends ItemView {
+  constructor(leaf, plugin) { super(leaf); this.plugin = plugin; this.rows = []; this.generation = 0; }
+  getViewType() { return VIEW; }
+  getDisplayText() { return this.file?.basename || 'Bili-Peek 观看工作台'; }
+  getIcon() { return 'film'; }
+  getState() { return { file: this.file?.path }; }
+  async setState(state, result) {
+    const file = this.app.vault.getAbstractFileByPath(state.file || '');
+    if (file) await this.setFile(file);
+    await super.setState(state, result);
+  }
+  button(label, callback, className = '') {
+    const button = element('button', className, label); button.type = 'button';
+    button.addEventListener('click', callback); return button;
+  }
+  iconButton(icon, label, callback, iconOnly = false) {
+    const button = this.button('', callback, iconOnly ? 'bili-peek-icon-button' : '');
+    button.title = label; button.setAttribute('aria-label', label);
+    const glyph = element('span', 'bili-peek-icon'); glyph.setAttribute('aria-hidden', 'true');
+    if (typeof setIcon === 'function') setIcon(glyph, icon); else glyph.textContent = iconOnly ? label.slice(0, 1) : '';
+    button.append(glyph); if (!iconOnly) button.append(element('span', '', label));
+    return button;
+  }
+  async onOpen() {
+    this.contentEl.replaceChildren(); this.contentEl.classList.add('bili-peek-workbench');
+    this.root = element('section', 'bili-peek-wb'); this.root.dataset.mode = 'watch';
+    const toolbar = element('div', 'bili-peek-toolbar bili-peek-main-tools');
+    this.modeButton = this.iconButton('notebook-pen', '记笔记', () => { this.mode(this.root.dataset.mode === 'write' ? 'watch' : 'write'); void this.plugin.persist().catch(error => new Notice(error.message)); });
+    const original = this.iconButton('square-pen', '打开原笔记', () => this.plugin.openMarkdown(this.file).catch(error => new Notice(error.message)), true);
+    const size = element('details', 'bili-peek-size'); const summary = element('summary'); summary.title = '调整视频区大小'; summary.setAttribute('aria-label', '调整视频区大小');
+    const sizeIcon = element('span', 'bili-peek-icon'); if (typeof setIcon === 'function') setIcon(sizeIcon, 'panels-left-right'); summary.append(sizeIcon, element('span', '', '视频大小'));
+    const sizePanel = element('div', 'bili-peek-size-panel'), widthLabel = element('label', '', '视频区宽度');
+    this.width = element('input'); this.width.type = 'range'; this.width.min = '45'; this.width.max = '68'; this.width.setAttribute('aria-label', '视频区宽度');
+    this.widthValue = element('output');
+    this.registerDomEvent(this.width, 'input', () => { const value = Number(this.width.value); this.root.style.setProperty('--bili-video-share', value + '%'); this.widthValue.textContent = value + '%'; this.plugin.settings[this.root.dataset.mode + 'Share'] = value; });
+    this.registerDomEvent(this.width, 'change', () => { void this.plugin.persist().catch(error => new Notice(error.message)); });
+    widthLabel.append(this.widthValue); sizePanel.append(widthLabel, this.width); size.append(summary, sizePanel);
+    toolbar.append(this.modeButton, size, original);
+    this.registerDomEvent(this.root, 'click', event => { if (!size.contains(event.target)) size.open = false; });
+    this.registerDomEvent(size, 'keydown', event => { if (event.key === 'Escape') { size.open = false; summary.focus(); } });
+    const layout = element('div', 'bili-peek-layout'), media = element('div', 'bili-peek-media');
+    this.video = element('video'); this.video.controls = true; this.video.preload = 'auto'; this.video.playsInline = true;
+    this.video.setAttribute('aria-label', '当前片段视频'); media.append(this.video);
+    this.caption = element('section', 'bili-peek-captions');
+    const captionTools = element('div', 'bili-peek-toolbar bili-peek-caption-tools');
+    this.followEnabled = this.plugin.settings.follow;
+    this.followButton = this.iconButton('list-end', '自动跟随字幕', () => { this.followEnabled = !this.followEnabled; this.followButton.setAttribute('aria-pressed', String(this.followEnabled)); this.manualUntil = 0; this.highlight(true); this.plugin.settings.follow = this.followEnabled; void this.plugin.persist().catch(error => new Notice(error.message)); }, true);
+    this.followButton.setAttribute('aria-pressed', String(this.followEnabled));
+    this.transcript = element('div', 'bili-peek-transcript'); this.transcript.tabIndex = 0; this.transcript.setAttribute('aria-label', '字幕，独立滚动');
+    this.captionToggle = this.iconButton('chevron-right', '识别稿', () => this.foldCaptions(!this.captionBody.hidden));
+    this.captionToggle.setAttribute('aria-expanded', 'false');
+    this.captionBody = element('div', 'bili-peek-caption-body'); this.captionBody.append(this.transcript);
+    this.languageSelect = element('select'); this.languageSelect.setAttribute('aria-label', '字幕语言'); this.languageSelect.title = '字幕显示语言';
+    for (const [value, label] of [['original', '原文'], ['zh', '中文'], ['both', '双语']]) { const option = element('option', '', label); option.value = value; this.languageSelect.append(option); }
+    this.registerDomEvent(this.languageSelect, 'change', () => { void this.setLanguage(this.languageSelect.value); });
+    this.captionSearch = element('input', 'bili-peek-caption-search'); this.captionSearch.type = 'search'; this.captionSearch.placeholder = '搜索字幕'; this.captionSearch.setAttribute('aria-label', '模糊搜索字幕'); this.captionSearch.title = '按文字顺序模糊匹配，空格分隔多个关键词';
+    this.registerDomEvent(this.captionSearch, 'input', () => { if (this.captionSearch.value.trim()) this.foldCaptions(false); this.filterCaptions(); });
+    this.registerDomEvent(this.captionSearch, 'keydown', event => { if (event.key === 'Escape') { event.stopPropagation(); this.captionSearch.value = ''; this.filterCaptions(); } });
+    this.searchStatus = element('div', 'bili-peek-origin'); this.searchStatus.setAttribute('role', 'status');
+    captionTools.append(this.captionToggle, this.captionSearch, this.languageSelect, this.followButton);
+    this.translationStatus = element('div', 'bili-peek-origin'); this.translationStatus.setAttribute('role', 'status');
+    this.language = 'original'; this.caption.append(captionTools, this.translationStatus, this.searchStatus, this.captionBody);
+    const notes = element('section', 'bili-peek-notes'), noteTools = element('div', 'bili-peek-toolbar');
+    noteTools.append(element('span', 'bili-peek-note-title', '我的笔记'), this.iconButton('clock-3', '插入当前时间', () => { this.editor.value += `${this.editor.value ? '\n' : ''}[${stamp(this.video.currentTime)}] `; this.keepDraft(); this.editor.focus(); }, true), this.iconButton('save', '保存', () => this.saveNotes().catch(error => new Notice(error.message))));
+    this.editor = element('textarea'); this.editor.setAttribute('aria-label', '个人笔记'); this.editor.placeholder = '记录你的观察、问题和想法，原字幕不会被修改。';
+    this.saved = element('div', 'bili-peek-note-status'); this.saved.setAttribute('role', 'status');
+    this.registerDomEvent(this.editor, 'input', () => this.keepDraft()); notes.append(noteTools, this.editor, this.saved);
+    layout.append(media, this.caption, notes); this.root.append(toolbar, layout); this.contentEl.append(this.root); this.mode(this.plugin.settings.mode || 'write');
+    this.mediaStatus = element('div', 'bili-peek-media-status'); this.mediaStatus.setAttribute('role', 'status'); media.append(this.mediaStatus);
+    this.registerDomEvent(this.video, 'error', () => { this.mediaStatus.textContent = '视频加载失败，请打开原笔记检查附件。文件不会被删除。'; });
+    this.registerDomEvent(this.video, 'canplay', () => { this.mediaStatus.textContent = ''; });
+    this.registerDomEvent(this.video, 'timeupdate', () => this.highlight());
+    this.registerDomEvent(this.video, 'loadedmetadata', () => {
+      const position = this.pendingTime ?? this.plugin.settings.positions[this.file?.path]; this.pendingTime = undefined;
+      if (Number.isFinite(position) && position < this.video.duration) seek(this.video, position);
+    });
+    this.registerDomEvent(this.transcript, 'wheel', () => { this.manualUntil = Date.now() + 5000; }, { passive: true });
+    this.registerDomEvent(this.transcript, 'pointerdown', () => { this.manualUntil = Date.now() + 5000; });
+    if (this.pendingFile) { const file = this.pendingFile; this.pendingFile = undefined; await this.setFile(file); }
+  }
+  mode(mode) {
+    this.root.dataset.mode = mode; this.plugin.settings.mode = mode;
+    this.modeButton.setAttribute('aria-pressed', String(mode === 'write')); this.modeButton.title = mode === 'write' ? '收起个人笔记，专注观看' : '展开个人笔记，边看边记';
+    const value = this.plugin.settings[mode + 'Share'] || (mode === 'watch' ? 62 : 58);
+    this.width.value = String(value); this.widthValue.textContent = value + '%'; this.root.style.setProperty('--bili-video-share', value + '%');
+  }
+  foldCaptions(collapsed) {
+    this.captionBody.hidden = collapsed; this.captionToggle.setAttribute('aria-expanded', String(!collapsed));
+    const glyph = this.captionToggle.querySelector('.bili-peek-icon'); if (glyph && typeof setIcon === 'function') setIcon(glyph, collapsed ? 'chevron-right' : 'chevron-down');
+  }
+  clearTranslation() { this.translationChild?.kill(); this.translationChild = undefined; this.translationRequest = undefined; this.translationSource = undefined; this.translations = undefined; this.language = 'original'; if (this.translationStatus) this.translationStatus.textContent = ''; }
+  async setLanguage(language) {
+    this.language = language; this.foldCaptions(false);
+    if (this.languageSelect) this.languageSelect.value = language;
+    if (language === 'original' || this.translations) { this.showSource(this.kind); return; }
+    if (this.translationRequest) return;
+    const items = this.kind === 'original' ? this.original : this.asr;
+    if (!items?.length) { this.translationStatus.textContent = '没有可翻译的字幕'; return; }
+    const request = {}; this.translationRequest = request;
+    const source = items.map(item => ({ time: item.time, text: item.text }));
+    this.translationSource = JSON.stringify(source);
+    const cache = this.asrPath.replace(/\.buzz\.json$/, `.${this.kind}.zh.json`);
+    this.translationStatus.textContent = '正在本地翻译，视频可继续播放…';
+    try {
+      let translated;
+      if (await this.app.vault.adapter.exists(cache)) {
+        try {
+          const saved = JSON.parse(await this.app.vault.adapter.read(cache));
+          if (saved.direction === 'en-zh' && JSON.stringify(saved.source) === JSON.stringify(source)) translated = saved.texts;
+        } catch { /* An invalid translation cache can be regenerated without touching the note. */ }
+      }
+      if (!translated) {
+        if (this.translationRequest !== request) return;
+        const config = this.plugin.translationConfig;
+        if (!config) throw new Error('本地翻译工具未安装，请先运行 helper/install-translation.py 并配置插件');
+        const path = require('node:path');
+        if (![config.python, config.script, config.model].every(value => typeof value === 'string' && path.isAbsolute(value))) throw new Error('本地翻译路径配置无效');
+        translated = await new Promise((resolve, reject) => {
+          const child = require('node:child_process').spawn(config.python, [config.script, config.model], { windowsHide: true, shell: false, env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' } });
+          this.translationChild = child; let output = '', errors = '', failure;
+          const stop = error => { failure = error; child.kill(); };
+          const timer = setTimeout(() => stop(new Error('翻译超时，请重试；原文保留')), 600000);
+          const cleanup = () => { clearTimeout(timer); if (this.translationChild === child) this.translationChild = undefined; };
+          child.stdout.on('data', data => { output += data; if (output.length > 4000000) stop(new Error('翻译结果过大')); });
+          child.stderr.on('data', data => { errors = (errors + data).slice(-2000); });
+          child.on('error', error => { cleanup(); reject(new Error(`无法启动翻译工具：${error.code}`)); });
+          child.on('close', code => { cleanup(); if (failure) return reject(failure); if (code !== 0) return reject(new Error(errors.trim() || '本地翻译未完成')); try { resolve(JSON.parse(output).texts); } catch { reject(new Error('翻译结果格式无效')); } });
+          child.stdin.on('error', () => {}); child.stdin.end(JSON.stringify({ texts: source.map(item => item.text) }));
+        });
+      }
+      if (!Array.isArray(translated) || translated.length !== source.length || translated.some(text => typeof text !== 'string' || !text.trim())) throw new Error('译文不完整，原文已保留');
+      if (this.translationRequest !== request) return;
+      await this.app.vault.adapter.write(cache, JSON.stringify({ engine: 'Argos/CTranslate2', direction: 'en-zh', source, texts: translated }));
+      if (this.translationRequest !== request) return;
+      this.translations = translated; this.translationStatus.textContent = ''; if (this.languageSelect) this.languageSelect.title = '本地中文机器译文，原文保留'; this.showSource(this.kind);
+    } catch (error) {
+      if (this.translationRequest === request) { this.language = 'original'; this.translationStatus.textContent = `翻译失败：${error.message}`; this.showSource(this.kind); }
+    } finally { if (this.translationRequest === request) this.translationRequest = undefined; }
+  }
+  async play() {
+    if (!this.video?.src) return;
+    const name = this.info?.media?.split('/').pop();
+    for (const video of document.querySelectorAll('video')) if (video !== this.video && name && (video.currentSrc || video.src).includes(name)) video.pause();
+    try { await this.video.play(); }
+    catch { this.mediaStatus.textContent = '点击视频播放按钮即可播放。'; }
+  }
+  rememberPosition() { if (this.file && Number.isFinite(this.video?.currentTime)) this.plugin.settings.positions[this.file.path] = this.video.currentTime; }
+  keepDraft() { if (this.file) { this.plugin.settings.drafts[this.file.path] = this.editor.value; this.saved.textContent = '草稿 · 点击保存'; clearTimeout(this.plugin.draftTimer); this.plugin.draftTimer = setTimeout(() => this.plugin.persist().catch(error => new Notice(error.message)), 350); } }
+  async saveNotes() {
+    if (this.savingNotes) return;
+    if (!this.file || this.editor.value === this.savedNotes) return;
+    const text = this.editor.value, file = this.file, previous = this.savedNotes;
+    this.savingNotes = true;
+    try {
+      await this.app.vault.process(file, source => replaceNotes(source, text, previous));
+      if (this.file === file) {
+        this.savedNotes = text.trim();
+        if (this.editor.value === text) { this.editor.value = this.savedNotes; this.saved.textContent = '笔记已保存'; }
+        else this.saved.textContent = '前一稿已保存 · 新修改仍是草稿';
+      }
+      if (this.plugin.settings.drafts[file.path] === text) delete this.plugin.settings.drafts[file.path];
+      await this.plugin.persist();
+    } finally { this.savingNotes = false; }
+  }
+  async setFile(file) {
+    if (!this.video) { this.pendingFile = file; return; }
+    const generation = ++this.generation;
+    if (this.file?.path !== file.path) { this.rememberPosition(); if (this.file) void this.plugin.persist().catch(error => new Notice(error.message)); }
+    const source = await this.app.vault.cachedRead(file), info = noteInfo(source);
+    const asset = assetFor(this.app, info.media, file);
+    if (generation !== this.generation) return;
+    if (!asset) throw new Error('当前笔记没有可用的 Bili-Peek 视频附件');
+    const changed = this.file?.path !== file.path;
+    if (changed) { this.clearTranslation(); this.kind = undefined; if (this.captionSearch) this.captionSearch.value = ''; }
+    this.file = file; this.info = info; this.original = info.original;
+    if (changed) { this.savedNotes = info.notes; this.editor.value = this.plugin.settings.drafts[file.path] ?? info.notes; this.saved.textContent = this.editor.value !== info.notes ? '已恢复未保存的草稿' : ''; }
+    const resource = this.app.vault.getResourcePath(asset);
+    if (this.resource !== resource) { this.video.pause(); this.resource = resource; this.pendingTime = undefined; this.mediaStatus.textContent = '正在加载视频…'; this.video.src = resource; }
+    this.asr = paragraphs(source, '语音识别稿'); this.asrError = ''; this.asrPath = asset.path.replace(/\.mp4$/, '.buzz.json');
+    if (!info.original.length && info.sourceHasSubtitles !== true) {
+      const sidecar = this.app.vault.getAbstractFileByPath(this.asrPath);
+      if (sidecar) {
+        try {
+          const data = JSON.parse(await this.app.vault.cachedRead(sidecar));
+          if (data.engine !== 'Buzz' || !Array.isArray(data.cues) || data.cues.some(cue => !Number.isFinite(cue.from) || cue.from < 0 || !Number.isFinite(cue.to) || cue.to <= cue.from || typeof cue.content !== 'string')) throw new Error('识别稿格式无效');
+          if (generation !== this.generation) return;
+          this.asr = data.cues.map(cue => ({ time: cue.from, label: stamp(cue.from), text: cue.content }));
+        } catch (error) { this.asrError = error.message; }
+      }
+    } else this.asr = [];
+    if (generation !== this.generation) return;
+    this.showSource(info.original.length || info.sourceHasSubtitles === true ? 'original' : 'asr');
+  }
+  showSource(kind) {
+    const changed = kind !== this.kind;
+    if (changed && this.kind !== undefined) this.clearTranslation();
+    const items = kind === 'original' ? this.original : this.asr;
+    if (this.translationSource && JSON.stringify((items || []).map(item => ({ time: item.time, text: item.text }))) !== this.translationSource) this.clearTranslation();
+    if (this.languageSelect) this.languageSelect.value = this.language;
+    this.captionToggle.querySelector('span:last-child').textContent = kind === 'asr' ? '识别稿' : '字幕';
+    this.captionToggle.title = kind === 'asr' ? 'Buzz 自动语音识别稿，点击展开或折叠' : '原视频字幕，点击展开或折叠';
+    if (changed) this.foldCaptions(false);
+    this.kind = kind; this.rows = []; this.transcript.replaceChildren();
+
+    if (!items?.length) {
+      const message = this.asrError ? `识别稿读取失败：${this.asrError}` : this.info.sourceHasSubtitles === true ? '原视频有字幕，但当前片段未取得字幕。不会调用 Buzz。' : this.info.sourceHasSubtitles === false ? '原视频无字幕。保存时由 Buzz 补识别稿；若识别失败，请在视频页重试保存。' : '此旧笔记没有记录源字幕状态。刷新 B 站脚本后重新保存，可确认是否需要 Buzz。';
+      this.transcript.append(element('p', 'bili-peek-empty', message)); this.filterCaptions(); return;
+    }
+    const fragment = document.createDocumentFragment();
+    for (const [index, item] of items.entries()) {
+      const row = this.button('', () => { this.pendingTime = item.time; if (seek(this.video, item.time)) this.pendingTime = undefined; this.manualUntil = 0; this.highlight(); }, 'bili-peek-cue');
+      const translation = this.translations?.[index];
+      const text = translation && this.language === 'zh' ? translation : translation && this.language === 'both' ? item.text + '\n\n' + translation : item.text;
+      const textNode = element('span', 'bili-peek-cue-text', text);
+      row.append(element('span', 'bili-peek-time', item.label), textNode); fragment.append(row); this.rows.push({ item, row, textNode, text });
+    }
+    this.transcript.append(fragment); this.lastActive = -1; this.filterCaptions(); this.highlight();
+  }
+  filterCaptions() {
+    const query = this.captionSearch?.value.trim() || ''; let count = 0;
+    for (const { row, item, textNode, text = item.text } of this.rows) {
+      const matched = query ? captionMatches(text, query) : new Set();
+      row.hidden = matched === null;
+      if (!row.hidden) { count++; if (textNode) highlightCaption(textNode, text, query, matched); }
+    }
+    if (this.searchStatus) this.searchStatus.textContent = query ? !this.rows.length ? '当前没有可搜索的字幕' : count ? `${count} / ${this.rows.length} 条匹配` : '没有匹配的字幕，试试更短的关键词' : '';
+    this.transcript.scrollTop = 0;
+    if (!query && this.video) { this.manualUntil = 0; this.highlight(true); }
+  }
+  highlight(forceFollow = false) {
+    let low = 0, high = this.rows.length;
+    while (low < high) { const mid = (low + high) >>> 1; if (this.rows[mid].item.time <= this.video.currentTime) low = mid + 1; else high = mid; }
+    const active = low - 1;
+    if (active === this.lastActive && !forceFollow) return;
+    if (active !== this.lastActive) {
+      this.rows[this.lastActive]?.row.removeAttribute('aria-current');
+      this.rows[active]?.row.setAttribute('aria-current', 'true'); this.lastActive = active;
+    }
+    if (active >= 0 && this.followEnabled && !this.captionSearch?.value.trim() && Date.now() >= (this.manualUntil || 0)) this.transcript.scrollTop = Math.max(0, this.rows[active].row.offsetTop - this.transcript.clientHeight / 3);
+  }
+  async onClose() { this.generation++; this.clearTranslation(); this.rememberPosition(); this.video?.pause(); this.video?.removeAttribute('src'); this.video?.load(); await this.plugin.persist(); }
+}
+
+async function trashUnreferenced(vault, names) {
+  const documents = vault.getFiles().filter(file => ['md', 'canvas', 'base'].includes(file.extension));
+  const contents = await Promise.all(documents.map(file => vault.cachedRead(file)));
+  let removed = 0;
+  for (const file of vault.getFiles()) {
+    if (!/\/Bili-Peek附件\/[a-f0-9]{20}\.mp4$/.test('/' + file.path) || !names.has(file.name)) continue;
+    if (contents.some(text => text.includes(file.name))) continue;
+    await vault.trash(file, true); removed++;
+  }
+  return removed;
 }
 
 module.exports = class BiliPeekPlayer extends Plugin {
-  onload() {
-    this.layouts = new Map();
+  async onload() {
+    const saved = await this.loadData() || {};
+    try { this.translationConfig = JSON.parse(await this.app.vault.adapter.read(`${this.app.vault.configDir}/plugins/${this.manifest.id}/translation.json`)); } catch { this.translationConfig = undefined; }
+    this.settings = { ...saved, mode: saved.mode === 'watch' ? 'watch' : 'write', watchShare: Math.min(68, Math.max(45, Number(saved.watchShare) || 62)), writeShare: Math.min(68, Math.max(45, Number(saved.writeShare) || 58)), videoShare: Math.min(75, Math.max(45, Number(saved.videoShare) || 62)), follow: saved.follow !== false, drafts: saved.drafts || {}, positions: saved.positions || {} };
+    this.openQueue = Promise.resolve();
+    this.markdownLeaves = new WeakMap(); this.defaultRequest = 0;
+    this.registerView(VIEW, leaf => new Workbench(leaf, this));
+    this.addCommand({ id: 'open-workbench', name: '打开当前视频观看工作台', callback: () => { const file = this.app.workspace.getActiveFile(); if (file) this.openNote(file).catch(error => new Notice(error.message)); } });
+    this.registerEvent(this.app.workspace.on('file-open', file => this.scheduleDefault(file)));
+    this.app.workspace.onLayoutReady(() => this.scheduleDefault(this.app.workspace.getActiveFile()));
+    this.registerEvent(this.app.vault.on('modify', file => { for (const { view } of this.app.workspace.getLeavesOfType(VIEW)) if (view.file?.path === file.path || view.asrPath === file.path) void view.setFile(view.file).catch(error => new Notice(error.message)); }));
+    this.registerEvent(this.app.vault.on('create', file => { for (const { view } of this.app.workspace.getLeavesOfType(VIEW)) if (view.asrPath === file.path) void view.setFile(view.file).catch(error => new Notice(error.message)); }));
     this.registerMarkdownPostProcessor(async (element, context) => {
-      const file = this.app.vault.getAbstractFileByPath(context.sourcePath);
-      if (!file) return;
-      const source = await this.app.vault.cachedRead(file);
-      const match = source.match(/!\[\[(Bili-Peek附件\/[a-f0-9]{20}\.mp4)\]\]/);
-      if (!match || !source.includes('## 片段字幕')) return;
-      const asset = this.app.metadataCache.getFirstLinkpathDest(match[1], context.sourcePath);
-      if (!asset) return;
-      const resource = this.app.vault.getResourcePath(asset);
-      const items = paragraphs(source);
-      const root = element.closest('.markdown-preview-view');
-      if (root && items.length) {
-        const heading = [...element.querySelectorAll('h2')].find(item => item.textContent.trim() === '片段字幕');
-        if (heading && !root.querySelector('.bili-peek-reader')) {
-          const reader = makeReader(items, resource); heading.after(reader);
-          const hidden = new Set();
-          const originalTexts = new Set(items.flatMap(item => [item.label, item.text]));
-          const hideOriginals = () => {
-            for (const paragraph of root.querySelectorAll('p')) {
-              if (paragraph.closest('.bili-peek-reader')) continue;
-              const originalVideo = [...paragraph.querySelectorAll('video')].find(video => (video.currentSrc || video.src) === resource);
-              if (originalVideo || originalTexts.has(paragraph.textContent.trim()) || paragraph.textContent.startsWith('时间以片段起点为 00:00。')) {
-                if (originalVideo) originalVideo.pause();
-                paragraph.classList.add('bili-peek-original'); hidden.add(paragraph);
-              }
-            }
-          };
-          hideOriginals();
-          const observer = new MutationObserver(hideOriginals); observer.observe(root, { childList: true, subtree: true });
-          const previous = this.layouts.get(root); if (previous) { previous.observer.disconnect(); previous.hidden.forEach(item => item.classList.remove('bili-peek-original')); }
-          this.layouts.set(root, { reader, observer, hidden });
+      // Only media blocks need a launcher; no observers or whole-note rescans.
+      const embed = element.querySelector('video, .internal-embed[src*="Bili-Peek附件"]');
+      if (!embed || element.querySelector('button.bili-peek-open')) return;
+      const file = this.app.vault.getAbstractFileByPath(context.sourcePath); if (!file) return;
+      const info = noteInfo(await this.app.vault.cachedRead(file)); if (!info.media) return;
+      const button = document.createElement('button'); button.className = 'bili-peek-open'; button.type = 'button'; button.textContent = '打开观看工作台';
+      button.addEventListener('click', () => this.openNote(file).catch(error => new Notice(error.message)));
+      element.prepend(button);
+    });
+  }
+
+  persist() { return this.saveData(this.settings); }
+  scheduleDefault(file) {
+    const request = ++this.defaultRequest, leaf = this.app.workspace.activeLeaf;
+    clearTimeout(this.defaultTimer);
+    if (!file || file.extension !== 'md' || leaf?.view.getViewType() !== 'markdown' || this.markdownLeaves.get(leaf) === file.path) return;
+    const open = async (attempt = 0) => {
+      try {
+        if (request !== this.defaultRequest || this.app.workspace.activeLeaf !== leaf || this.app.workspace.getActiveFile()?.path !== file.path) return;
+        const source = await this.app.vault.cachedRead(file);
+        if (request !== this.defaultRequest || !source.trim() || !noteInfo(source).media) return;
+        // Never blur a Markdown editor that has not loaded its file or has unsaved edits.
+        if (leaf.view.file?.path !== file.path || leaf.view.editor?.getValue() !== source) {
+          if (attempt < 20) this.defaultTimer = setTimeout(() => { void open(attempt + 1); }, 100);
+          return;
         }
-        if (root.querySelector('.bili-peek-reader')) return;
-      }
-      for (const strong of element.querySelectorAll('p > strong')) {
-        const time = seconds(strong.textContent.trim());
-        if (time === null || strong.parentElement.textContent.trim() !== strong.textContent.trim()) continue;
-        const button = document.createElement('button');
-        button.className = 'bili-peek-time'; button.textContent = strong.textContent;
-        button.type = 'button'; button.title = `跳转片段到 ${strong.textContent}`;
-        button.dataset.seconds = String(time); button.dataset.resource = resource;
-        strong.replaceWith(button);
-      }
-    });
-    this.registerDomEvent(document, 'click', event => {
-      const button = event.target.closest?.('button.bili-peek-time');
-      if (!button) return;
-      event.preventDefault(); event.stopPropagation();
-      const root = button.closest('.markdown-preview-view, .markdown-rendered');
-      const reader = button.closest('.bili-peek-reader');
-      const video = [...((reader || root)?.querySelectorAll('video') || [])].find(item => (item.currentSrc || item.src) === button.dataset.resource);
-      if (!video) { new Notice('当前笔记的视频尚未显示，请先打开视频所在位置。'); return; }
-      if (!seek(video, Number(button.dataset.seconds))) {
-        new Notice('视频尚未加载完成，或时间超出片段范围，请稍后重试。'); return;
-      }
-      if (!reader) video.scrollIntoView({ block: 'nearest', behavior: 'instant' });
-      root.querySelectorAll('.bili-peek-time.is-selected').forEach(item => item.classList.remove('is-selected'));
-      button.classList.add('is-selected');
-    });
+        await this.openNote(file, false, leaf, source);
+      } catch (error) { new Notice(error.message); }
+    };
+    this.defaultTimer = setTimeout(() => { void open(); }, 100);
   }
-  onunload() {
-    for (const { reader, observer, hidden } of this.layouts.values()) {
-      observer.disconnect(); reader.remove(); hidden.forEach(item => item.classList.remove('bili-peek-original'));
-    }
-    this.layouts.clear();
-    document.querySelectorAll('button.bili-peek-time').forEach(button => {
-      const strong = document.createElement('strong'); strong.textContent = button.textContent; button.replaceWith(strong);
+  openNote(file, autoplay = true, expectedLeaf, expectedSource) {
+    const task = this.openQueue.then(async () => {
+      if (!file || file.extension !== 'md') return;
+      if (expectedLeaf && (this.app.workspace.activeLeaf !== expectedLeaf || expectedLeaf.view.file?.path !== file.path || expectedLeaf.view.editor?.getValue() !== expectedSource)) return;
+      const leaves = this.app.workspace.getLeavesOfType(VIEW);
+      const leaf = leaves.find(item => item.view.file?.path === file.path) || (expectedLeaf && !expectedLeaf.getViewState?.().pinned ? expectedLeaf : this.app.workspace.getLeaf('tab'));
+      if (!(leaf.view instanceof Workbench) || leaf.view.file?.path !== file.path) {
+        await leaf.setViewState({ type: VIEW, state: { file: file.path }, active: true });
+        await leaf.loadIfDeferred?.();
+      }
+      await this.app.workspace.revealLeaf(leaf);
+      // Recheck after async loading: typing in the incoming editor must never close it.
+      if (expectedLeaf && expectedLeaf !== leaf && !expectedLeaf.getViewState?.().pinned && expectedLeaf.view.getViewType() === 'markdown' && expectedLeaf.view.file?.path === file.path && expectedLeaf.view.editor?.getValue() === expectedSource) expectedLeaf.detach();
+      if (autoplay && leaf.view instanceof Workbench) void leaf.view.play();
     });
+    this.openQueue = task.catch(() => {}); return task;
   }
+  openMarkdown(file) {
+    const task = this.openQueue.then(async () => {
+      if (!file) return;
+      const leaf = this.app.workspace.getLeavesOfType('markdown').find(item => item.view.file?.path === file.path) || this.app.workspace.getLeaf('split');
+      this.markdownLeaves.set(leaf, file.path);
+      if (leaf.view.file?.path !== file.path) await leaf.openFile(file);
+      await this.app.workspace.revealLeaf(leaf);
+    });
+    this.openQueue = task.catch(() => {}); return task;
+  }
+  onunload() { this.defaultRequest++; clearTimeout(this.defaultTimer); clearTimeout(this.draftTimer); void this.persist().catch(() => {}); this.app.workspace.detachLeavesOfType(VIEW); document.querySelectorAll('button.bili-peek-open').forEach(button => button.remove()); }
+
 };
 module.exports.seconds = seconds;
+module.exports.matchesCaption = matchesCaption;
+module.exports.captionMatches = captionMatches;
 module.exports.seek = seek;
 module.exports.paragraphs = paragraphs;
-module.exports.makeReader = makeReader;
+module.exports.noteInfo = noteInfo;
+module.exports.replaceNotes = replaceNotes;
+module.exports.trashUnreferenced = trashUnreferenced;
 
-const plugin=new module.exports();plugin.app={vault:{getAbstractFileByPath:()=>({}),cachedRead:async()=>"![[Bili-Peek附件/aaaaaaaaaaaaaaaaaaaa.mp4]]\n\n## 片段字幕\n\n**00:00**\n\n第 1 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**00:05**\n\n第 2 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**00:10**\n\n第 3 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**00:15**\n\n第 4 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**00:20**\n\n第 5 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**00:25**\n\n第 6 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**00:30**\n\n第 7 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**00:35**\n\n第 8 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**00:40**\n\n第 9 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**00:45**\n\n第 10 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**00:50**\n\n第 11 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**00:55**\n\n第 12 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**01:00**\n\n第 13 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**01:05**\n\n第 14 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**01:10**\n\n第 15 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**01:15**\n\n第 16 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**01:20**\n\n第 17 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**01:25**\n\n第 18 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**01:30**\n\n第 19 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**01:35**\n\n第 20 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**01:40**\n\n第 21 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**01:45**\n\n第 22 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**01:50**\n\n第 23 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**01:55**\n\n第 24 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**02:00**\n\n第 25 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**02:05**\n\n第 26 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**02:10**\n\n第 27 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**02:15**\n\n第 28 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**02:20**\n\n第 29 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。\n\n**02:25**\n\n第 30 段字幕。保留连贯正文和原始措辞。向下阅读时，视频仍留在上方，只有字幕区域滚动。",getResourcePath:()=>location.origin+'/silent.wav'},metadataCache:{getFirstLinkpathDest:()=>({})}};plugin.onload();processor(document.getElementById('section'),{sourcePath:'preview.md'});</script>
+(async()=>{const plugin=new module.exports();plugin.app=app;await plugin.onload();const view=factory({});await view.onOpen();await view.setFile({path:'preview.md',basename:'示例',extension:'md'});})();</script>

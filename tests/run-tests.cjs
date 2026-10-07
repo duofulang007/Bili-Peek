@@ -9,7 +9,7 @@ const { cleanSandbox } = require('./clean-sandbox.cjs');
 const root = path.resolve(__dirname, '..');
 const suites = [
   'core', 'data', 'export', 'watch', 'quality', 'obsidian-player',
-  'memory', 'helper-control', 'runtime', 'segment-download', 'concurrent-jobs'
+  'memory', 'helper-control', 'runtime', 'segment-download', 'segment-cache', 'concurrent-jobs', 'transcription', 'vault-paths'
 ].map(name => `tests/${name}.test.cjs`);
 
 const child = spawn(process.execPath, ['--test', ...suites], { stdio: 'inherit', cwd: root });

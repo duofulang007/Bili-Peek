@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const { parseSidx, selectSegments, parseRange, makePlaylist } = require('../helper/segment-download.cjs');
 const fs = require('node:fs/promises');
 const path = require('node:path');
+process.env.BILI_PEEK_SEGMENT_CACHE = path.resolve(__dirname, 'export-sandbox/segment-cache');
 const http = require('node:http');
 const { once } = require('node:events');
 const { run, exportClip } = require('../helper/export.cjs');
@@ -31,6 +32,36 @@ test('cold metadata transient timeout retries without requiring a second save cl
   };
   const result = await loadMetadata('https://cold-test.bilivideo.com/v', { offset: 0, size: 4 }, { offset: 4, size: 68 }, fetcher, new TransferControl(), () => {});
   assert.deepEqual(result.buffer, index()); assert.equal(calls, 2);
+});
+
+test('exact clips prepare both tracks concurrently and stop siblings on metadata failure', async () => {
+  await fs.mkdir(path.join(__dirname, 'export-sandbox'), { recursive: true });
+  const folder = await fs.mkdtemp(path.join(__dirname, 'export-sandbox/prepare-'));
+  const data = Buffer.concat([Buffer.from('init'), index(), Buffer.alloc(364, 7)]);
+  const task = { id: 'BV1xx411c7mD', cid: Date.now(), start: 0, end: 4,
+    videoUrl: 'https://prepare.bilivideo.com/video', audioUrl: 'https://prepare.bilivideo.com/audio',
+    videoTrack: { init: '0-3', index: '4-71', codec: 'avc1' }, audioTrack: { init: '0-3', index: '4-71', codec: 'aac' } };
+  let active = 0, peak = 0;
+  const fetcher = async (url, options) => {
+    const [, start, end] = /^bytes=(\d+)-(\d+)$/.exec(options.headers.Range);
+    if (+start === 0) {
+      active++; peak = Math.max(peak, active);
+      await new Promise(resolve => setTimeout(resolve, 40)); active--;
+    }
+    return new Response(data.subarray(+start, +end + 1), { status: 206, headers: { 'content-range': `bytes ${start}-${end}/${data.length}` } });
+  };
+  const result = await downloadTracks(task, {}, run, () => {}, new TransferControl(), new Map(), folder, fetcher);
+  assert.equal(peak, 2, 'audio initialization must not wait for video initialization');
+  assert.deepEqual(result.sources.map(source => source.track), ['video', 'audio']);
+  const control = new TransferControl(); let siblingStopped = false, backupRequests = 0;
+  await assert.rejects(downloadTracks({ ...task, cid: task.cid + 1, audioUrls: ['https://backup.bilivideo.com/audio'] }, {}, run, () => {}, control, new Map(), folder, async (url, options) => {
+    if (url.endsWith('/video')) throw new Error('invalid metadata');
+    if (url.includes('backup')) { backupRequests++; throw new Error('unexpected backup'); }
+    await new Promise((resolve, reject) => options.signal.addEventListener('abort', () => { siblingStopped = true; reject(options.signal.reason); }, { once: true }));
+  }), /invalid metadata/);
+  assert.equal(siblingStopped, true);
+  assert.equal(backupRequests, 0, 'a failed preparation must not start another source');
+  assert.equal(control.controllers.size, 0);
 });
 
 test('fast cut with unequal audio and video fragment boundaries keeps duration and alignment', async () => {
@@ -195,7 +226,9 @@ test('range bridge rejects full-file responses and arbitrary hosts', async () =>
 });
 
 test('real NRE downloads selected media, pauses, reuses verified cache and produces the same off-keyframe clip', { skip: !require('node:fs').existsSync(path.resolve(__dirname, '../.tools/N_m3u8DL-RE.exe')) }, async () => {
-  const root = path.resolve(__dirname, '..'), folder = await fs.mkdtemp(path.join(root, 'tests/export-sandbox/segment-'));
+  const root = path.resolve(__dirname, '..');
+  await fs.mkdir(path.join(root, 'tests/export-sandbox'), { recursive: true });
+  const folder = await fs.mkdtemp(path.join(root, 'tests/export-sandbox/segment-'));
   const ffmpeg = path.join(root, '.tools/ffmpeg.exe'), ffprobe = path.join(root, '.tools/ffprobe.exe');
   const segmentDownloader = path.join(root, '.tools/N_m3u8DL-RE.exe');
   const sources = {}, descriptors = {};
@@ -209,7 +242,7 @@ test('real NRE downloads selected media, pauses, reuses verified cache and produ
     descriptors[name] = { init: `0-${p - 1}`, index: `${p}-${p + size - 1}`, codec: name === 'video' ? 'avc1' : 'mp4a' };
   }
   const ranges = [], routes = new Map();
-  const cacheRoot = path.join(root, '.local/segment-cache'); await fs.mkdir(cacheRoot, { recursive: true });
+  const cacheRoot = process.env.BILI_PEEK_SEGMENT_CACHE; await fs.mkdir(cacheRoot, { recursive: true });
   const previousCache = new Set(await fs.readdir(cacheRoot));
   const fetcher = async (url, options) => {
     const name = url.includes('/video') ? 'video' : 'audio';
@@ -230,7 +263,7 @@ test('real NRE downloads selected media, pauses, reuses verified cache and produ
     for (const [prefix, handler] of routes) if (req.url.startsWith(prefix + '/')) return handler(req, res);
     res.writeHead(404); res.end();
   }).listen(0, '127.0.0.1'); await once(server, 'listening');
-  const config = { vault: folder, output: path.join(folder, 'notes'), ffmpeg, ffprobe, segmentDownloader, port: server.address().port, segmentNative: false };
+  const config = { vault: folder, output: path.join(folder, 'notes'), ffmpeg, ffprobe, segmentDownloader, port: server.address().port, segmentNative: false, ...(process.env.BILI_PEEK_TEST_NVENC === 'full' ? { videoEncoder: 'h264_nvenc', hardwareDecode: true } : {}) };
   await fs.mkdir(path.join(folder, '.obsidian'));
   const task = { id: 'BV1xx411c7mD', part: 1, cid: Math.floor(Date.now() / 1000), start: 5.1, end: 7.4, videoUrl: 'https://test.bilivideo.com/video', audioUrl: 'https://test.bilivideo.com/audio', videoTrack: descriptors.video, audioTrack: descriptors.audio, subtitles: [], videoOnly: true, tags: ['测试'], noteName: '分片测试' };
   const control = new TransferControl(), updates = [], transfers = []; let didPause = false;
@@ -386,6 +419,16 @@ test('real NRE downloads selected media, pauses, reuses verified cache and produ
     await assert.rejects(downloadTracks({ ...task, cid: task.cid + 900 }, config, failureRunner, () => {}, new TransferControl(), routes, failureWork, fetcher), /音频测试失败/);
     assert.ok(videoStopped, 'failure aborts sibling track before cleaning up routes');
     assert.equal(routes.size, 0);
+    const manager = require('../helper/segment-cache.cjs').cacheManager(config);
+    const budgetPin = await manager.acquire('e'.repeat(64), manager.limit, folder);
+    const boundedWork = path.join(folder, 'bounded'); await fs.mkdir(boundedWork);
+    try {
+      await downloadTracks(nativeTask, nativeConfig, run, () => {}, new TransferControl(), routes, boundedWork, fetcher);
+      for (const name of ['video', 'audio']) assert.deepEqual(await fs.readFile(path.join(boundedWork, name + '.mp4')), await fs.readFile(path.join(thirdWork, name + '.mp4')), 'temporary storage preserves assembled media when active cache occupies the budget');
+      await assert.rejects(fs.access(path.join(boundedWork, 'segment-transient')), { code: 'ENOENT' });
+      assert.ok((await manager.status()).bytes <= manager.limit);
+      assert.equal(manager.pins.size, 1, 'only the test reservation remains after download cleanup');
+    } finally { await budgetPin.release(); }
     const benchmark = [];
     if (process.env.BILI_PEEK_SEGMENT_BENCHMARK === '1') for (let sample = 0; sample < 2; sample++) for (const serial of sample ? [false, true] : [true, false]) {
       const benchWork = path.join(folder, `benchmark-${sample}-${serial}`); await fs.mkdir(benchWork);

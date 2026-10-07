@@ -9,7 +9,7 @@
   nav strong{color:#55c5ec;font-size:18px}nav span{color:#afb1b7}button{padding:8px 12px;background:#25272b;border:1px solid #44474c;border-radius:5px;color:inherit;cursor:pointer}
   main{max-width:1440px;padding:28px;margin:auto}.layout{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:24px}
   h1{font-size:20px;margin:0 0 18px}#bilibili-player{position:relative;background:#080909;width:100%;aspect-ratio:16/9}
-  video{display:block;width:100%;height:100%}.media-label{position:absolute;left:28px;top:24px;pointer-events:none;color:#c5c8ce;font-size:18px}
+  video{display:block;width:100%;height:100%}.media-label{position:absolute;left:28px;top:24px;pointer-events:none;color:#c5c8ce;font-size:18px}.media-label button{pointer-events:auto;margin-left:12px}
   .up-panel-container{padding:0 0 8px;margin-bottom:0}.up-panel-container strong{font-size:16px}.up-panel-container p{margin:4px 0;color:#aaa}
   .recommend-list-v1 h2{font-size:14px;margin:0 0 12px}.video-page-card-small{display:flex;gap:12px;padding:12px 0;border-bottom:1px solid #34363a}
   .thumb{width:112px;flex:none;aspect-ratio:16/9;background:#303b40;border-radius:5px;display:grid;place-items:center;color:#bbcbd3}
@@ -23,7 +23,7 @@
   <h1>词云与密度双图 · 图内点击跳转</h1>
   <div class="layout">
     <div class="left-container">
-      <div id="bilibili-player" class="bpx-player-container"><video id="sample" controls muted preload="auto" src="/silent.wav"></video><div class="media-label">160 秒静音测试媒体</div></div><span class="bpx-player-ctrl-quality-result" hidden>720P</span>
+      <div id="bilibili-player" class="bpx-player-container"><video id="sample" controls muted preload="auto" src="/silent.wav"></video><div class="media-label">160 秒静音测试媒体<button id="fullscreen-preview">全屏浮层预览</button></div></div><span class="bpx-player-ctrl-quality-result" hidden>720P</span>
       <p class="notice">实际播放进度由浏览器媒体元素提供。右侧推荐节点应完整保留。</p>
       <pre id="test-results" aria-live="polite">等待运行验收。</pre>
     </div>
@@ -52,13 +52,17 @@ window.GM_xmlhttpRequest=options=>{
     if (window.fixtureHelperOffline) { setTimeout(() => options.onerror(), 60); return { abort() {} }; }
     let result = {};
     if (endpoint === '/health') result = { ready: true, segmentAvailable: Boolean(window.fixtureSegments) };
+    if (endpoint === '/folders') result = { folders: ['.', '网页内容', '学习/编程', '学习/语言', '视频笔记'], defaultDirectory: window.fixtureDefaultDirectory || '网页内容' };
     if (endpoint === '/sign-wbi') { window.fixtureQuality = JSON.parse(options.data).params.qn; result = { query: 'bvid=BVLocalPreview&cid=1001&qn=' + window.fixtureQuality }; }
-    if (endpoint === '/clips') { window.fixtureLatestClip = JSON.parse(options.data); window.fixtureJobPolls = 0; result = { key: 'a'.repeat(20) }; }
+    if (endpoint === '/clips') { window.fixtureLatestClip = JSON.parse(options.data); window.fixtureJobPolls = 0; window.fixtureClipCount = (window.fixtureClipCount || 0) + 1; result = { key: 'a'.repeat(20) }; }
     if (endpoint.startsWith('/jobs/')) {
       const action = endpoint.split('/')[3];
       if (action) { if (action === 'cancel') window.fixtureCancelled = true; else window.fixturePaused = action === 'pause'; result = { paused: Boolean(window.fixturePaused) }; }
       else if (window.fixtureSegments) result = window.fixtureCancelled ? { state: 'cancelled' } : { state: 'processing', stage: window.fixtureStage || 'download', canPause: !window.fixtureStage, paused: Boolean(window.fixturePaused), percent: window.fixtureStage ? 1 : 42, downloadedBytes: 44040192, totalBytes: 104857600, bytesPerSecond: window.fixturePaused ? 0 : 2097152, etaSeconds: window.fixturePaused ? null : 29, elapsedSeconds: 8 };
-      else result = window.fixtureExport === 'fail' ? { state: 'failed', error: '模拟写入失败' } : ++window.fixtureJobPolls === 1 ? { state: 'processing', stage: 'media', percent: 42, elapsedSeconds: 8 } : { state: 'complete', filename: '测试片段.md', hasSubtitles: !window.fixtureLatestClip.videoOnly, obsidianUri: 'obsidian://open?path=test.md' };
+      else {
+        result = window.fixtureExport === 'fail' ? { state: 'failed', error: '模拟写入失败' } : ++window.fixtureJobPolls === 1 ? { state: 'processing', stage: 'media', percent: 42, elapsedSeconds: 8 } : { state: 'complete', filename: '测试片段.md', completedAt: Date.now(), hasSubtitles: !window.fixtureLatestClip.videoOnly, obsidianUri: 'obsidian://open?path=test-' + window.fixtureClipCount + '.md' };
+        if (result.state === 'complete' && window.fixtureLatestClip.setDefaultDirectory) window.fixtureDefaultDirectory = window.fixtureLatestClip.outputDirectory;
+      }
     }
     setTimeout(() => options.onload({ status: 200, responseText: JSON.stringify(result) }), 60);
     return { abort() {} };

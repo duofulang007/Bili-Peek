@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bili-Peek · 弹幕观看助手
 // @namespace    bili-peek
-// @version      0.3.43
+// @version      0.3.48
 // @description  视频右侧双图：弹幕词云与可点击跳转的密度图，推荐视频保留在下方。
 // @match        https://www.bilibili.com/video/*
 // @match        https://www.bilibili.com/
@@ -41,7 +41,7 @@
   }
 
   function overallProgress(stage, percent, segmented, previous = 0) {
-    const ranges = { prepare: [1, 0], source: [3, 0], download: [5, 75], media: segmented ? [80, 12] : [5, 87], probe: [92, 0], verify: [94, 5], write: [99, 0], complete: [100, 0] };
+    const ranges = { prepare: [1, 0], source: [3, 0], download: [5, 75], media: segmented ? [80, 12] : [5, 87], probe: [92, 0], verify: [94, 5], transcribe: [99, 0], write: [99, 0], complete: [100, 0] };
     const [start, span] = ranges[stage] || [previous, 0];
     const fraction = Number.isFinite(percent) ? Math.min(100, Math.max(0, percent)) / 100 : 0;
     return Math.max(previous, Math.round(start + span * fraction));
@@ -320,9 +320,17 @@
       .sort((a, b) => b - a).map(id => ({ id, label: data.support_formats?.find(format => format.quality === id)?.new_description || labels[id] || `画质 ${id}` }));
   }
   function defaultDownloadQuality(qualities) { return qualities.find(item => item.id === 80)?.id || qualities[0]?.id; }
+  function folderMatches(folders, query) {
+    const words = query.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
+    return folders.filter(folder => words.every(word => {
+      let index = -1;
+      for (const letter of word) { index = folder.toLocaleLowerCase().indexOf(letter, index + 1); if (index < 0) return false; }
+      return true;
+    })).sort((a, b) => Number(b.toLocaleLowerCase().includes(query.toLocaleLowerCase())) - Number(a.toLocaleLowerCase().includes(query.toLocaleLowerCase())) || a.length - b.length || a.localeCompare(b, 'zh-CN')).slice(0, 8);
+  }
 
   if (typeof document === 'undefined') {
-    if (typeof module !== 'undefined') module.exports = { formatTime, overallProgress, routeKey, seekMedia, decodeDanmaku, density, wordStats, parsePageState, mergeWatchRanges, watchedAdvance, selectQualityStream, selectMediaUrl, downloadQualities, defaultDownloadQuality };
+    if (typeof module !== 'undefined') module.exports = { formatTime, overallProgress, routeKey, seekMedia, decodeDanmaku, density, wordStats, parsePageState, mergeWatchRanges, watchedAdvance, selectQualityStream, selectMediaUrl, downloadQualities, defaultDownloadQuality, folderMatches };
     return;
   }
   if (window.top !== window.self || document.getElementById(HOST_ID)) return;
@@ -332,7 +340,7 @@
   let records = [], videoDuration = 0, selectedTerm = '', phraseMode = false;
   let dataRoute = null, dataRequest = null, chartData = null, hoverTime = 0;
   let watchRoute = null, watchRanges = [], watchSample = null, watchStart = null, watchDirty = false, watchSavedAt = 0;
-  let seekNoticeTimer, openNoteTimer;
+  let seekNoticeTimer;
   // 非空时表示「下一次 renderCharts 是从加载态落地」，落地后由 renderCharts 清空。
   let settleCharts = null;
   const exportDrafts = new Map();
@@ -340,6 +348,7 @@
   const exportingRoutes = new Set(), transferStates = new Map();
   let helperOnline = false, helperFailures = 0, helperTimer, helperSync = 0, pageSuspended = false;
   const savedValue = (key, fallback) => typeof GM_getValue === 'function' ? GM_getValue(key, fallback) : fallback;
+  const latestNotes = new Map(Object.entries(savedValue('latest-export-notes', {}) || {}));
   const managed = () => Boolean(savedValue('export-token', ''));
   let helperManaged = managed();
   const helperPort = () => {
@@ -349,6 +358,7 @@
   const diagnostic = { started: Date.now(), reconciles: 0, charts: 0, mediaEvents: 0, clicks: 0, moves: 0, seeks: 0, lastSeek: null, lastError: '' };
   const cache = new Map();
   let alignedRail = null, originalRailMargin = '';
+  let overlayCloseTimer;
   const SVG = 'http://www.w3.org/2000/svg';
   const styles = `
     :host{display:block;pointer-events:auto;width:100%;min-width:0;margin:0 0 18px;color-scheme:light;
@@ -358,6 +368,20 @@
       color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',sans-serif}
     :host([data-theme=dark]){color-scheme:dark;--bg:#18191b;--text:#eceef0;--muted:#a6a9af;--line:#36383c;--accent:#829eed;--fill:#6e8be96b;--shadow:#0009;--live:#fb7299;--live-soft:#fb729933;--live-ink:#fb7299;--live-ink-soft:#fb729933}
     :host([hidden]),[hidden]{display:none!important}*{box-sizing:border-box}
+    #edge-trigger,#overlay-pin{display:none}
+    :host([data-overlay]){position:fixed;inset:24px 0 auto auto;width:min(372px,100vw);height:min(680px,calc(100dvh - 100px));margin:0;z-index:2147483647;--bg:#18191b55;--text:#eceef0;--muted:#c4c7ce;--line:#ffffff30;--accent:#829eed;--fill:#6e8be940;--live-ink:#fb7299;--live-ink-soft:#fb729926;text-shadow:0 1px 3px #000}
+    :host([data-overlay]) #edge-trigger{display:block;position:fixed;right:0;top:24px;bottom:76px;width:10px;padding:0;border:0;background:transparent;pointer-events:auto}
+    :host([data-overlay]) #edge-trigger:focus-visible{outline-offset:-3px}
+    :host([data-overlay]) #panel-content{height:100%;padding-right:12px;display:flex;flex-direction:column;gap:12px;opacity:0;transform:translateX(100%);visibility:hidden;pointer-events:none;transition:transform 220ms cubic-bezier(.32,.72,0,1),opacity 220ms cubic-bezier(.23,1,.32,1),visibility 0s 220ms}
+    :host([data-overlay][data-expanded]) #panel-content{opacity:1;transform:translateX(0);visibility:visible;pointer-events:auto;transition-delay:0s}
+    :host([data-overlay]) #overlay-pin{display:grid;place-items:center;flex:none;margin-left:auto;width:28px;height:24px;padding:3px}
+    :host([data-overlay]) #mode{margin-left:0}#overlay-pin svg{width:16px;height:16px}
+    #overlay-pin[aria-pressed=true]{color:var(--accent);border-color:var(--accent);background:var(--fill)}
+    :host([data-overlay]) figure{flex:1;min-height:130px;height:0;margin:0;border-color:#ffffff20;background:#18191b22}
+    :host([data-overlay]) #panel-content{overflow-y:auto;overflow-x:hidden}
+    :host([data-overlay]) #export-dialog{background:#18191bf2;text-shadow:none;pointer-events:auto}
+    :host([data-overlay]) #export-dialog::backdrop{background:transparent}
+    @media(prefers-reduced-motion:reduce){:host([data-overlay]) #panel-content{transform:none;transition:opacity 125ms ease,visibility 0s 125ms}}
     figure{position:relative;display:flex;flex-direction:column;height:var(--card-height,292px);background:var(--bg);margin:0 0 20px;padding:12px 10px 8px;border:1px solid var(--line);border-radius:6px}
     figure:last-of-type{margin-bottom:0}figcaption{flex:none}
     figcaption{display:flex;align-items:center;gap:8px;padding:0 2px 4px;font-size:14px;font-weight:600}
@@ -435,6 +459,11 @@
     #export-dialog label{display:block;margin-top:14px}#export-dialog small{color:var(--muted);font-size:12px}
     #export-dialog input,#export-dialog textarea,#export-dialog select{display:block;width:100%;margin-top:6px;padding:9px 10px;border:1px solid var(--line);border-radius:5px;background:var(--bg);color:var(--text);font:inherit}
     #export-dialog select{max-width:none;margin-left:0}
+    #export-dialog{max-height:calc(100vh - 32px);overflow:auto}
+    #export-dialog .path-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:14px}#export-dialog .path-heading label{margin:0}
+    #export-dialog .path-default{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)}#export-dialog .path-default input{width:auto;margin:0;padding:0;accent-color:var(--accent)}
+    #export-path-options{max-height:132px;overflow:auto;margin-top:4px;border:1px solid var(--line);border-radius:5px}#export-path-options[hidden]{display:none}
+    #export-dialog #export-path-options button{display:block;width:100%;text-align:left;padding:6px 10px;border:0;border-radius:0;overflow-wrap:anywhere}#export-path-options button[aria-selected=true]{background:var(--fill);color:var(--accent)}
     #export-dialog textarea{resize:vertical;min-height:80px}#export-dialog .dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:20px}
     #export-transfer{flex:none;margin-top:5px}#export-transfer[hidden]{display:none}#export-transfer progress{display:block;width:100%;height:5px;accent-color:var(--accent)}.transfer-row{display:flex;align-items:center;gap:6px;margin-top:4px;font-size:11px;color:var(--muted)}#transfer-detail{flex:1;min-width:0}#export-transfer button{padding:4px 8px;min-height:28px;font-size:12px}
     #export-dialog button{padding:8px 16px}#export-confirm{color:var(--accent);border-color:var(--accent);background:var(--fill)}
@@ -463,7 +492,7 @@
     return Math.max(0, Math.min(videoDuration, ((clientX - rect.left) / rect.width * 320 - 32) / 276 * videoDuration));
   }
   // Keep in sync with @version above (the value is substituted by the test suite's guard test).
-  const SCRIPT_VERSION = '0.3.43';
+  const SCRIPT_VERSION = '0.3.48';
   function createPanel() {
     host = document.createElement('div');
     host.id = HOST_ID;
@@ -474,15 +503,38 @@
     const shadow = host.attachShadow({ mode: 'open' });
     shadow.addEventListener('click', () => { diagnostic.clicks++; }, { capture: true, passive: true });
     shadow.addEventListener('pointermove', () => { diagnostic.moves++; }, { capture: true, passive: true });
-    shadow.innerHTML = `<style>${styles}</style>
-      <figure aria-label="弹幕词云"><figcaption id="cloud-caption">弹幕词云<button id="clear" hidden title="清除词语筛选">清除</button><div id="mode" role="group" aria-label="词云模式"><button id="mode-words" type="button" aria-pressed="true" title="按词语出现的弹幕条数排序">高频词</button><button id="mode-phrases" type="button" aria-pressed="false" title="查看重复出现的短语">重复短语</button></div></figcaption>
+    shadow.innerHTML = `<style>${styles}</style><button id="edge-trigger" type="button" aria-label="展开 Bili-Peek 工具栏" aria-expanded="false" aria-controls="panel-content"></button><div id="panel-content">
+      <figure aria-label="弹幕词云"><figcaption id="cloud-caption">弹幕词云<button id="clear" hidden title="清除词语筛选">清除</button><button id="overlay-pin" type="button" aria-label="固定展开" title="固定展开" aria-pressed="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="m8 3 8 0-1 7 4 4H5l4-4-1-7ZM12 14v7"/></svg></button><div id="mode" role="group" aria-label="词云模式"><button id="mode-words" type="button" aria-pressed="true" title="按词语出现的弹幕条数排序">高频词</button><button id="mode-phrases" type="button" aria-pressed="false" title="查看重复出现的短语">重复短语</button></div></figcaption>
         <div id="cloud-note"></div><svg id="cloud" viewBox="0 0 320 230" role="group" aria-label="点击词语查看出现时段"></svg><div id="cloud-empty" class="empty">正在加载弹幕…</div></figure>
       <figure id="timeline" aria-label="弹幕密度图"><div class="timeline-info"><div id="tooltip" hidden></div></div>
         <div class="density-wrap"><div id="watch-track" aria-label="已观看区间" hidden></div><span id="watch-start" hidden></span><span id="seek-status" role="status" aria-live="polite"></span><svg id="density" viewBox="0 0 320 220" preserveAspectRatio="none" role="button" tabindex="0" aria-label="弹幕密度，点击位置跳转，左右键选择时间，回车跳转"></svg>
         <div id="range-track" aria-label="在密度图中拖动选择截取时段"><div id="range-window" class="range-window" tabindex="0" role="group" aria-label="移动整个选区，左右键平移"></div><div id="range-start" class="range-handle" tabindex="0" role="slider" aria-label="截取起点" aria-orientation="horizontal"></div><div id="range-end" class="range-handle" tabindex="0" role="slider" aria-label="截取终点" aria-orientation="horizontal"></div></div></div>
         <div class="clip-controls"><div class="time-field"><button id="jump-start" class="clip-jump" type="button" aria-label="跳转到填写的开始时间" title="跳转到开始时间" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 9c0 5-7 12-7 12S5 14 5 9a7 7 0 1 1 14 0Z"/><circle cx="12" cy="9" r="2.5"/><path d="M5 18c-2 1-3 2-3 3 0 2 4.5 3 10 3s10-1 10-3c0-1-1-2-3-3" transform="translate(2 2) scale(.8333)"/></svg></button><input id="clip-start" type="text" inputmode="numeric" aria-label="截取开始时间" aria-describedby="status" placeholder="00:00" title="分:秒或时:分:秒" disabled></div><output id="clip-duration" aria-label="截取总时长" title="截取总时长">—</output><div class="time-field"><input id="clip-end" type="text" inputmode="numeric" aria-label="截取结束时间" aria-describedby="status" placeholder="00:00" title="分:秒或时:分:秒" disabled><button id="jump-end" class="clip-jump" type="button" aria-label="跳转到填写的结束时间" title="跳转到结束时间" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 9c0 5-7 12-7 12S5 14 5 9a7 7 0 1 1 14 0Z"/><circle cx="12" cy="9" r="2.5"/><path d="M5 18c-2 1-3 2-3 3 0 2 4.5 3 10 3s10-1 10-3c0-1-1-2-3-3" transform="translate(2 2) scale(.8333)"/></svg></button></div><button id="save-clip" type="button" aria-label="保存选区草稿" title="保存选区草稿（尚未接通音视频导出）" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h12l4 4v12a2 2 0 0 1-2 2Z"/><path d="M7 3v6h10V3M7 21v-8h10v8"/></svg></button></div>
-        <div id="density-empty" class="empty">正在加载弹幕…</div><div id="export-transfer" hidden><progress id="transfer-progress" max="100" aria-label="当前保存阶段进度"></progress><div class="transfer-row"><span id="transfer-detail"></span><a id="open-note" hidden aria-label="打开保存的 Obsidian 笔记" title="打开笔记"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M14 3h7v7M21 3l-11 11M10 3H3v18h18v-7"/></svg><span>打开笔记</span></a><button id="transfer-pause" type="button" hidden>暂停</button><button id="transfer-cancel" type="button">取消</button></div></div><div id="status" role="status" aria-live="polite"></div></figure>`;
+        <div id="density-empty" class="empty">正在加载弹幕…</div><div id="export-transfer" hidden><progress id="transfer-progress" max="100" aria-label="当前保存阶段进度"></progress><div class="transfer-row"><span id="transfer-detail"></span><a id="open-note" hidden aria-label="打开保存的 Obsidian 笔记" title="打开笔记"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M14 3h7v7M21 3l-11 11M10 3H3v18h18v-7"/></svg><span>打开笔记</span></a><button id="transfer-pause" type="button" hidden>暂停</button><button id="transfer-cancel" type="button">取消</button></div></div><div id="status" role="status" aria-live="polite"></div></figure></div>`;
     ui = Object.fromEntries(['cloud', 'cloud-caption', 'cloud-note', 'mode', 'mode-words', 'mode-phrases', 'clear', 'density', 'cloud-empty', 'density-empty', 'tooltip', 'timeline', 'status', 'open-note', 'range-track', 'range-window', 'range-start', 'range-end', 'clip-start', 'clip-end', 'clip-duration', 'watch-track', 'watch-start', 'seek-status', 'jump-start', 'jump-end', 'save-clip'].map(id => [id, shadow.getElementById(id)]));
+    const content = shadow.getElementById('panel-content');
+    const edge = shadow.getElementById('edge-trigger');
+    const pin = shadow.getElementById('overlay-pin');
+    const expand = () => { if (host.hasAttribute('data-overlay')) setOverlayExpanded(true); };
+    edge.addEventListener('pointerenter', () => { if (matchMedia('(hover:hover) and (pointer:fine)').matches) expand(); });
+    edge.addEventListener('click', expand);
+    edge.addEventListener('focus', expand);
+    content.addEventListener('pointerenter', expand);
+    for (const node of [edge, content]) node.addEventListener('pointerleave', queueOverlayClose);
+    shadow.addEventListener('focusin', expand);
+    shadow.addEventListener('focusout', queueOverlayClose);
+    shadow.addEventListener('pointerup', queueOverlayClose);
+    shadow.addEventListener('lostpointercapture', queueOverlayClose);
+    pin.addEventListener('click', () => {
+      const pinned = pin.getAttribute('aria-pressed') !== 'true';
+      pin.setAttribute('aria-pressed', String(pinned));
+      pin.title = pinned ? '解除固定展开' : '固定展开';
+      pin.setAttribute('aria-label', pin.title);
+      setOverlayExpanded(true); queueOverlayClose();
+    });
+    for (const type of ['click', 'dblclick', 'pointerdown', 'pointerup', 'keydown', 'keyup', 'wheel']) {
+      shadow.addEventListener(type, event => { if (host.hasAttribute('data-overlay')) event.stopPropagation(); });
+    }
     for (const id of ['export-transfer', 'transfer-progress', 'transfer-detail', 'transfer-pause', 'transfer-cancel']) ui[id] = shadow.getElementById(id);
     bindClipControls();
     for (const [id, phrases] of [['mode-words', false], ['mode-phrases', true]]) {
@@ -535,6 +587,28 @@
     ui['transfer-cancel'].hidden = Boolean(state.finished);
     ui['transfer-cancel'].disabled = !state.cancel || Boolean(state.cannotCancel);
     ui['transfer-cancel'].onclick = state.cancel || null;
+    renderNoteLink();
+  }
+
+  function renderNoteLink() {
+    if (!ui) return;
+    const note = latestNotes.get(currentRoute?.split(':')[0]);
+    const valid = typeof note?.uri === 'string' && /^obsidian:\/\/open\?path=/.test(note.uri);
+    ui['open-note'].hidden = !valid;
+    if (valid) { ui['open-note'].href = note.uri; ui['open-note'].title = '打开最新保存的笔记' + (note.filename ? '：' + note.filename : ''); }
+  }
+  function rememberNote(route, result) {
+    if (typeof result.obsidianUri !== 'string' || !/^obsidian:\/\/open\?path=/.test(result.obsidianUri)) return;
+    const stored = savedValue('latest-export-notes', {});
+    if (stored && typeof stored === 'object' && !Array.isArray(stored)) for (const [id, entry] of Object.entries(stored)) {
+      if (typeof entry?.uri === 'string' && /^obsidian:\/\/open\?path=/.test(entry.uri) && Number.isFinite(entry.at) && entry.at > (latestNotes.get(id)?.at || 0)) latestNotes.set(id, entry);
+    }
+    const video = route.split(':')[0], at = result.completedAt || Date.now();
+    if ((latestNotes.get(video)?.at || 0) > at) return;
+    latestNotes.delete(video); latestNotes.set(video, { uri: result.obsidianUri, filename: result.filename, at });
+    if (latestNotes.size > 200) latestNotes.delete(latestNotes.keys().next().value);
+    try { GM_setValue('latest-export-notes', Object.fromEntries(latestNotes)); } catch (error) { console.error('Bili-Peek: 笔记跳转记录未持久化', error); }
+    renderNoteLink();
   }
 
   function updateClipUI(syncInputs = true) {
@@ -542,7 +616,9 @@
     for (const id of ['clip-start', 'clip-end', 'save-clip']) ui[id].disabled = !enabled || (id === 'save-clip' && exportingRoutes.has(currentRoute));
     ui['save-clip'].setAttribute('aria-busy', String(exportingRoutes.has(currentRoute)));
     if (transferStates.has(currentRoute)) showTransfer(currentRoute, {});
+    else if (latestNotes.has(currentRoute?.split(':')[0])) showTransfer(currentRoute, { value: 100, text: '已保存笔记，可打开最新一段。', finished: true, canPause: false });
     else ui['export-transfer'].hidden = true;
+    renderNoteLink();
     ui['range-track'].hidden = !enabled;
     if (!enabled) { ui['seek-status'].textContent = ''; ui['clip-duration'].textContent = '—'; ui['jump-start'].disabled = true; ui['jump-end'].disabled = true; return; }
     ui['range-track'].style.top = 22 / chartData.height * 100 + '%';
@@ -674,8 +750,8 @@
           const health = await helperRequest('/health', token, undefined, 2000);
           if (!health?.ready) throw new Error('助手尚未就绪，请检查 CPod 运行状态后重试');
           exportMedia = await loadExportMedia(taskRoute, token);
-          return { segmentAvailable: Boolean(health.segmentAvailable), qualities: exportMedia.qualities };
-        } : null);
+          return { segmentAvailable: Boolean(health.segmentAvailable), qualities: exportMedia.qualities, title: exportMedia.info.data.title };
+        } : null, token ? () => helperRequest('/folders', token) : null);
         if (!metadata) return;
         if (taskRoute !== currentRoute || taskRoute !== routeKey(location.href)) { status('视频已切换，请重新选择片段后保存。', true); return; }
         if (typeof GM_getValue !== 'function' || typeof GM_setValue !== 'function') throw new Error('请在油猴中更新脚本权限后保存。');
@@ -704,19 +780,17 @@
             const result = await helperRequest(`/jobs/${job.key}`, token);
             if (result.state === 'complete') {
               overall = 100;
-              report(result.hasSubtitles === false ? '视频和笔记已保存到 Obsidian，未保存字幕。' : '视频、字幕和笔记已保存到 Obsidian。', false, true);
+              report(result.recognition?.state === 'complete' ? '视频和 Buzz 识别稿已保存，原视频无字幕。' : result.recognition?.state === 'failed' ? `视频和笔记已保存；Buzz 识别未完成：${String(result.recognition.error || '请重试').slice(-200)}` : result.hasSubtitles === false ? '视频和笔记已保存到 Obsidian，未保存字幕。' : '视频、字幕和笔记已保存到 Obsidian。', false, true);
               exportDrafts.delete(draftKey);
-              if (typeof result.obsidianUri === 'string' && /^obsidian:\/\/open\?path=/.test(result.obsidianUri) && currentRoute === taskRoute) {
-                clearTimeout(openNoteTimer); ui['open-note'].href = result.obsidianUri; ui['open-note'].hidden = false;
-                openNoteTimer = setTimeout(() => { ui['open-note'].hidden = true; }, 30000);
-              }
+              rememberNote(taskRoute, result);
+              if (result.defaultDirectoryError && currentRoute === taskRoute) status('笔记已保存，但默认路径未更新：' + result.defaultDirectoryError, true);
               return;
             }
             if (result.state === 'failed') throw new Error(result.error);
             if (result.state === 'cancelled') { report(metadata.downloadEngine === 'nre' ? '保存已取消；下载缓存已保留，可重试。' : '保存已取消，可重试。', false, true); return; }
             if (result.state === 'missing') throw new Error('助手已重启，任务状态丢失，请重试');
             if (result.stage) {
-              const label = { queued: `等待保存${result.queuePosition ? ` · 第 ${result.queuePosition} 个` : ''}`, prepare: '准备保存', source: '选择下载来源', download: '下载视频', media: metadata.downloadEngine === 'nre' ? '裁剪视频' : '下载并裁剪', probe: '检查时长', verify: '检查完整性', write: '写入 Obsidian', complete: '完成保存' }[result.stage] || '保存中';
+              const label = { queued: `等待保存${result.queuePosition ? ` · 第 ${result.queuePosition} 个` : ''}`, prepare: '准备保存', source: '选择下载来源', download: '下载视频', media: metadata.downloadEngine === 'nre' ? '裁剪视频' : '下载并裁剪', probe: '检查时长', verify: '检查完整性', transcribe: 'Buzz 语音识别', write: '写入 Obsidian', complete: '完成保存' }[result.stage] || '保存中';
               paused = Boolean(result.paused);
                 overall = overallProgress(result.stage, result.percent, metadata.downloadEngine === 'nre', overall);
                 const size = bytes => `${(bytes / 1048576).toFixed(1)} MB`;
@@ -741,12 +815,14 @@
     updateClipUI();
   }
 
-  function askExportMetadata(draftKey, range, loadMedia = null) {
+  function askExportMetadata(draftKey, range, loadMedia = null, loadFolders = null) {
     return new Promise(resolve => {
       const dialog = document.createElement('dialog'); dialog.id = 'export-dialog';
       dialog.innerHTML = `<form><h2>保存片段</h2><label>笔记名称<input id="export-name" maxlength="80" required></label><label>标签 <small>必填，用逗号分隔</small><input id="export-tags" placeholder="例如：学习/编程，待整理" required></label><label>摘要 <small>选填</small><textarea id="export-summary" maxlength="2000" placeholder="简单描述这段内容，也可以留空"></textarea></label><div class="dialog-actions"><button id="export-cancel" type="button">取消</button><button id="export-confirm" type="submit">保存</button></div></form>`;
       const name = dialog.querySelector('#export-name'), tags = dialog.querySelector('#export-tags');
       name.value = document.title.replace(/[_-]哔哩哔哩.*$/, '').trim().slice(0, 80) || '视频片段';
+      let nameEdited = false;
+      name.addEventListener('input', () => { nameEdited = true; });
       const summary = dialog.querySelector('#export-summary');
       const qualityLabel = document.createElement('label'); qualityLabel.textContent = '下载画质';
       const quality = document.createElement('select'); quality.id = 'export-quality'; qualityLabel.append(quality);
@@ -760,11 +836,12 @@
         try {
           const result = await loadMedia();
           if (!dialog.isConnected) return;
+          if (!nameEdited && typeof result.title === 'string' && result.title.trim()) name.value = result.title.trim().slice(0, 80);
           quality.replaceChildren();
           for (const item of result.qualities) { const option = document.createElement('option'); option.value = String(item.id); option.textContent = item.label; quality.append(option); }
           const savedQuality = exportDrafts.get(draftKey)?.downloadQuality;
           quality.value = String(result.qualities.some(item => item.id === savedQuality) ? savedQuality : defaultDownloadQuality(result.qualities));
-          quality.disabled = false; confirm.disabled = false; mediaReady = true; segmentAvailable = result.segmentAvailable;
+          quality.disabled = false; mediaReady = true; confirm.disabled = !foldersReady; segmentAvailable = result.segmentAvailable;
           qualityStatus.textContent = '';
         } catch (error) {
           if (!dialog.isConnected) return;
@@ -774,8 +851,53 @@
       };
       retry.addEventListener('click', refreshQuality);
       name.parentElement.after(qualityLabel);
+      const pathField = document.createElement('div');
+      pathField.innerHTML = `<div class="path-heading"><label for="export-path">保存路径</label><label class="path-default"><input id="export-path-default" type="checkbox">设为默认</label></div><input id="export-path" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="export-path-options" aria-describedby="export-path-status" placeholder="搜索仓库内文件夹" autocomplete="off"><div id="export-path-options" role="listbox" hidden></div><small id="export-path-status" role="status"></small><button id="export-path-retry" type="button" hidden>重试读取路径</button>`;
+      qualityLabel.after(pathField);
+      const destination = pathField.querySelector('#export-path'), makeDefault = pathField.querySelector('#export-path-default');
+      const pathOptions = pathField.querySelector('#export-path-options'), pathStatus = pathField.querySelector('#export-path-status'), pathRetry = pathField.querySelector('#export-path-retry');
+      let foldersReady = !loadFolders, folders = [], matches = [], focusedPath = -1;
+      destination.disabled = !loadFolders; makeDefault.disabled = !loadFolders;
+      const choosePath = value => { destination.value = value; destination.setCustomValidity(''); pathOptions.hidden = true; destination.setAttribute('aria-expanded', 'false'); destination.removeAttribute('aria-activedescendant'); pathStatus.textContent = '路径相对于当前 Obsidian 仓库'; remember(); };
+      const searchPaths = () => {
+        if (!foldersReady || !loadFolders) return;
+        destination.setCustomValidity(''); pathOptions.replaceChildren(); focusedPath = -1;
+        destination.removeAttribute('aria-activedescendant');
+        matches = folderMatches(folders, destination.value === '.' ? '' : destination.value);
+        pathOptions.hidden = !matches.length; destination.setAttribute('aria-expanded', String(Boolean(matches.length)));
+        pathStatus.textContent = matches.length ? '选择已有文件夹；支持关键词和缩写搜索' : '没有匹配的文件夹，请换一个关键词';
+        for (const [index, value] of matches.entries()) {
+          const button = document.createElement('button'); button.type = 'button'; button.id = 'export-path-option-' + index;
+          button.setAttribute('role', 'option'); button.setAttribute('aria-selected', 'false'); button.textContent = value === '.' ? '仓库根目录' : value;
+          button.addEventListener('click', () => { destination.focus(); choosePath(value); }); pathOptions.append(button);
+        }
+      };
+      destination.addEventListener('input', searchPaths); destination.addEventListener('focus', searchPaths);
+      destination.addEventListener('keydown', event => {
+        if (event.key === 'Escape' && !pathOptions.hidden) { event.preventDefault(); event.stopPropagation(); choosePath(destination.value); }
+        if (['ArrowDown', 'ArrowUp'].includes(event.key) && matches.length) {
+          event.preventDefault(); pathOptions.hidden = false; destination.setAttribute('aria-expanded', 'true');
+          focusedPath = (focusedPath + (event.key === 'ArrowDown' ? 1 : -1) + matches.length) % matches.length;
+          [...pathOptions.children].forEach((button, index) => button.setAttribute('aria-selected', String(index === focusedPath)));
+          destination.setAttribute('aria-activedescendant', 'export-path-option-' + focusedPath);
+        }
+        if (event.key === 'Enter' && !pathOptions.hidden && focusedPath >= 0) { event.preventDefault(); choosePath(matches[focusedPath]); }
+      });
+      const refreshFolders = async () => {
+        foldersReady = false; confirm.disabled = true; destination.disabled = true; pathRetry.hidden = true; pathStatus.textContent = '正在读取仓库文件夹…';
+        try {
+          const result = await loadFolders();
+          if (!dialog.isConnected) return;
+          folders = result.folders; foldersReady = true; destination.disabled = false;
+          destination.value = exportDrafts.get(draftKey)?.outputDirectory ?? result.defaultDirectory;
+          pathStatus.textContent = '路径相对于当前 Obsidian 仓库'; confirm.disabled = !mediaReady;
+        } catch (error) { if (dialog.isConnected) { pathStatus.textContent = error.message; pathRetry.hidden = false; } }
+      };
+      pathRetry.addEventListener('click', refreshFolders);
+      if (!loadFolders) { pathStatus.textContent = '连接助手后选择仓库文件夹'; makeDefault.disabled = true; }
       const saved = exportDrafts.get(draftKey);
-      if (saved) { name.value = saved.noteName; tags.value = saved.tagText; summary.value = saved.summary; }
+      if (saved) { nameEdited = saved.nameEdited ?? saved.noteName !== name.value; name.value = saved.noteName; tags.value = saved.tagText; summary.value = saved.summary; }
+      if (saved) makeDefault.checked = Boolean(saved.setDefaultDirectory);
       const context = document.createElement('p'); context.className = 'clip-summary';
       context.textContent = `${formatTime(range.start)}–${formatTime(range.end)} · ${Math.round(range.end - range.start)} 秒`;
       dialog.querySelector('h2').after(context);
@@ -789,7 +911,7 @@
           tags.setCustomValidity(''); tags.focus();
         }); recent.append(button);
       }
-      const remember = () => exportDrafts.set(draftKey, { noteName: name.value, tagText: tags.value, summary: summary.value, downloadQuality: quality.disabled ? exportDrafts.get(draftKey)?.downloadQuality : Number(quality.value) });
+      const remember = () => exportDrafts.set(draftKey, { noteName: name.value, nameEdited, tagText: tags.value, summary: summary.value, outputDirectory: destination.disabled ? exportDrafts.get(draftKey)?.outputDirectory : destination.value, setDefaultDirectory: makeDefault.checked, downloadQuality: quality.disabled ? exportDrafts.get(draftKey)?.downloadQuality : Number(quality.value) });
       dialog.addEventListener('input', remember);
       const finish = value => { dialog.close(); dialog.remove(); resolve(value); };
       dialog.addEventListener('cancel', event => { event.preventDefault(); finish(null); });
@@ -797,17 +919,19 @@
       tags.addEventListener('input', () => tags.setCustomValidity(''));
       dialog.querySelector('form').addEventListener('submit', event => {
         event.preventDefault();
-        if (!mediaReady) return;
+        if (!mediaReady || !foldersReady) return;
+        if (loadFolders && !folders.includes(destination.value)) { destination.setCustomValidity('请从匹配结果中选择已有文件夹'); destination.reportValidity(); return; }
         const parsed = [...new Set(tags.value.split(/[,，\s]+/).map(tag => tag.replace(/^#+/, '').trim()).filter(Boolean))];
         if (!parsed.length || parsed.length > 20 || parsed.some(tag => !/^[\p{L}\p{N}_-]+(?:\/[\p{L}\p{N}_-]+)*$/u.test(tag) || /^\d+$/.test(tag) || tag.length > 100)) {
           tags.setCustomValidity('请填写 1–20 个有效标签，可用中文、字母、数字、下划线、短横线和层级斜杠，不能只有数字。'); tags.reportValidity(); return;
         }
         remember();
         GM_setValue('recent-export-tags', [...new Set([...parsed, ...(Array.isArray(recentTags) ? recentTags : [])])].slice(0, 12));
-        finish({ noteName: name.value.trim(), tags: parsed, summary: summary.value.trim(), ...(quality.disabled ? {} : { downloadQuality: Number(quality.value) }), ...(segmentAvailable ? { downloadEngine: 'nre' } : {}) });
+        finish({ noteName: name.value.trim(), tags: parsed, summary: summary.value.trim(), ...(loadFolders ? { outputDirectory: destination.value, setDefaultDirectory: makeDefault.checked } : {}), ...(quality.disabled ? {} : { downloadQuality: Number(quality.value) }), ...(segmentAvailable ? { downloadEngine: 'nre' } : {}) });
       });
       host.shadowRoot.append(dialog); dialog.showModal(); name.focus(); name.select();
       if (loadMedia) refreshQuality();
+      if (loadFolders) refreshFolders();
     });
   }
 
@@ -869,6 +993,7 @@
     const info = await request(`https://api.bilibili.com/x/web-interface/view?${identity}`, false, controller.signal);
     const page = info.data?.pages?.find(item => item.page === part);
     if (info.code !== 0 || !page?.cid) throw new Error('无法确认当前视频或分 P');
+    if ((/^BV/.test(id) && info.data.bvid !== undefined && info.data.bvid !== id) || (/^av/i.test(id) && info.data.aid !== undefined && String(info.data.aid) !== id.slice(2))) throw new Error('视频信息与当前页面不一致，请刷新后重试');
     const nav = await request('https://api.bilibili.com/x/web-interface/nav', false, controller.signal);
     const wbi = nav.data?.wbi_img;
     if (!wbi?.img_url || !wbi?.sub_url) throw new Error('无法读取视频接口签名信息');
@@ -889,15 +1014,23 @@
     const identity = /^av/i.test(id) ? `aid=${id.slice(2)}` : `bvid=${id}`;
     const query = `${identity}&cid=${page.cid}`;
     let text = { body: [] };
-    const player = await request(`https://api.bilibili.com/x/player/wbi/v2?${query}`, false, controller.signal).catch(() => null);
+    let player;
+    try { player = await request(`https://api.bilibili.com/x/player/wbi/v2?${query}`, false, controller.signal); }
+    catch (error) { throw new Error('字幕信息读取失败，请重试：' + error.message); }
+    if (player?.code !== 0) throw new Error('字幕信息读取失败，请刷新或登录后重试');
+    if (player.data?.cid !== undefined && player.data.cid !== page.cid) throw new Error('字幕信息与当前分 P 不一致，请重试');
     const subtitles = player?.data?.subtitle?.subtitles || [];
+    const sourceHasSubtitles = player?.code === 0 && Array.isArray(player?.data?.subtitle?.subtitles) ? subtitles.length > 0 : undefined;
     const chosen = subtitles.find(item => item.lan === 'zh-CN' || item.lan === 'zh-Hans') || subtitles.find(item => /^ai-zh|^zh/.test(item.lan)) || subtitles[0];
     // Missing subtitles only degrade the export to video-only; the saved note states that.
     if (player?.code === 0 && chosen?.subtitle_url) {
       const subtitleUrl = new URL(chosen.subtitle_url, 'https://www.bilibili.com');
       if (subtitleUrl.protocol !== 'https:' || !['aisubtitle.hdslb.com', 'subtitle.bilibili.com'].includes(subtitleUrl.hostname)) throw new Error('字幕地址暂不支持，请反馈地址域名');
-      text = await request(subtitleUrl.href, false, controller.signal).catch(() => text);
+      try { text = await request(subtitleUrl.href, false, controller.signal); }
+      catch (error) { throw new Error('字幕下载失败，请重试：' + error.message); }
+      if (!Array.isArray(text?.body)) throw new Error('字幕内容格式无效，请重试');
     }
+    if (chosen && !chosen.subtitle_url) throw new Error('字幕地址缺失，请重试');
     const cues = Array.isArray(text.body) ? text.body.filter(cue => Number.isFinite(cue.from) && Number.isFinite(cue.to) && cue.to > cue.from && cue.to > range.start && cue.from < range.end && typeof cue.content === 'string' && cue.content.trim()) : [];
     if (!cues.length) {
       text = { body: [] };
@@ -909,7 +1042,7 @@
     if (!videoUrl || !audioUrl) throw new Error(`未取得可用的${!videoUrl ? '视频' : '音频'}下载地址，请重试；仍失败时请复制排错信息`);
     const descriptor = track => { const base = track.SegmentBase || track.segment_base; return base ? { init: base.Initialization || base.initialization, index: base.indexRange || base.index_range, codec: track.codecs } : undefined; };
     const addresses = track => [...new Set([track.baseUrl, track.base_url, ...(Array.isArray(track.backupUrl) ? track.backupUrl : []), ...(Array.isArray(track.backup_url) ? track.backup_url : [])].filter(url => selectMediaUrl({ baseUrl: url })))].slice(0, 3);
-    return { id, part, cid: page.cid, start: range.start, end: range.end, downloadQuality: quality, title: info.data.title, videoUrl, audioUrl, videoUrls: addresses(video), audioUrls: addresses(audio), videoTrack: descriptor(video), audioTrack: descriptor(audio), subtitles: text.body, videoOnly: !cues.length };
+    return { id, part, cid: page.cid, start: range.start, end: range.end, downloadQuality: quality, title: info.data.title, videoUrl, audioUrl, videoUrls: addresses(video), audioUrls: addresses(audio), videoTrack: descriptor(video), audioTrack: descriptor(audio), subtitles: text.body, videoOnly: !cues.length, ...(sourceHasSubtitles === undefined ? {} : { sourceHasSubtitles }) };
   }
 
   if (typeof GM_registerMenuCommand === 'function' && typeof GM_setValue === 'function') {
@@ -927,7 +1060,6 @@
     if (!ui) return;
     ui.status.textContent = message;
     ui.status.title = '';
-    if (!message) ui['open-note'].hidden = true;
     ui.status.dataset.error = String(error);
   }
   function ready() { return media && media.isConnected && media.readyState >= 1 && Number.isFinite(media.duration) && media.duration > 0; }
@@ -950,6 +1082,8 @@
     try {
       const raw = GM_getValue('watch-history', {});
       const history = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+      const previous = Array.isArray(history[watchRoute]?.ranges) ? history[watchRoute].ranges : [];
+      watchRanges = mergeWatchRanges([...previous, ...watchRanges], 0, 0);
       history[watchRoute] = { ranges: watchRanges, updated: Date.now() };
       const recent = Object.entries(history).sort((a, b) => (b[1]?.updated || 0) - (a[1]?.updated || 0)).slice(0, 200);
       GM_setValue('watch-history', Object.fromEntries(recent)); watchDirty = false; watchSavedAt = performance.now();
@@ -1448,6 +1582,7 @@
 
   function theme() {
     if (!host?.isConnected) return;
+    if (host.hasAttribute('data-overlay')) { host.dataset.theme = 'dark'; return; }
     let color;
     for (let node = host.parentElement; node; node = node.parentElement) {
       const value = getComputedStyle(node).backgroundColor;
@@ -1459,11 +1594,58 @@
     host.dataset.theme = darkness ? 'dark' : 'light';
   }
 
+  function setOverlayExpanded(expanded) {
+    clearTimeout(overlayCloseTimer);
+    host.toggleAttribute('data-expanded', expanded);
+    host.shadowRoot.getElementById('panel-content').inert = host.hasAttribute('data-overlay') && !expanded;
+    host.shadowRoot.getElementById('edge-trigger').setAttribute('aria-expanded', String(expanded));
+  }
+
+  function queueOverlayClose() {
+    clearTimeout(overlayCloseTimer);
+    if (!host?.hasAttribute('data-overlay')) return;
+    overlayCloseTimer = setTimeout(() => {
+      const shadow = host.shadowRoot;
+      const focused = shadow.activeElement;
+      if (shadow.getElementById('overlay-pin').getAttribute('aria-pressed') === 'true' || rangeDrag ||
+          shadow.querySelector('dialog[open]') || focused?.matches('input,textarea,select') ||
+          shadow.getElementById('panel-content').matches(':hover') || shadow.getElementById('edge-trigger').matches(':hover')) return;
+      if (focused) focused.blur();
+      setOverlayExpanded(false);
+    }, 500);
+  }
+
   function layoutVisibility() {
     if (!host) return;
     const player = media?.closest(PLAYER);
-    const wide = player?.querySelector('.bpx-state-web, .bpx-state-full') || player?.matches('.bpx-state-web, .bpx-state-full');
-    host.hidden = Boolean(document.fullscreenElement || wide);
+    const full = document.fullscreenElement;
+    const wide = player?.querySelector('.bpx-state-web, .bpx-state-full') || (player?.matches('.bpx-state-web, .bpx-state-full') ? player : null);
+    const target = full && media && full.contains(media) && !full.matches(MEDIA) ? full : !full && wide ? (wide.contains(media) ? wide : player) : null;
+    const changed = host.hasAttribute('data-overlay') !== Boolean(target);
+    host.hidden = Boolean(full && !target);
+    if (target) {
+      restoreRail();
+      if (host.parentElement !== target) target.append(host);
+      host.dataset.overlay = '';
+      host.dataset.placement = 'overlay';
+      host.style.setProperty('pointer-events', 'none', 'important');
+    } else {
+      host.removeAttribute('data-overlay');
+      host.style.setProperty('pointer-events', 'auto', 'important');
+      const place = destination();
+      if (place) {
+        if (host.parentElement !== place.parent || host.nextSibling !== place.before) place.parent.insertBefore(host, place.before);
+        host.dataset.placement = place.mode;
+      }
+    }
+    if (changed) {
+      host.shadowRoot.getElementById('overlay-pin').setAttribute('aria-pressed', 'false');
+      host.shadowRoot.getElementById('overlay-pin').title = '固定展开';
+      host.shadowRoot.getElementById('overlay-pin').setAttribute('aria-label', '固定展开');
+      setOverlayExpanded(false);
+    }
+    theme();
+    if (target && chartData) renderCharts();
   }
 
   function reconcile() {
@@ -1498,11 +1680,6 @@
       status('视频或分 P 已切换，正在重新连接播放器…');
     }
     currentRoute = key;
-    const place = destination();
-    if (place && (host.parentElement !== place.parent || host.nextSibling !== place.before)) {
-      place.parent.insertBefore(host, place.before);
-      host.dataset.placement = place.mode;
-    }
     const next = findMedia();
     const previous = media;
     bindMedia(next);
@@ -1552,7 +1729,9 @@
     themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'style', 'data-theme'] });
     themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class', 'style', 'data-theme'] });
   }
-  const playerModeObserver = new MutationObserver(schedule);
+  const playerModeObserver = new MutationObserver(records => {
+    if (records.some(record => record.target === observedPlayer || record.target.matches('.bpx-state-web, .bpx-state-full') || /\bbpx-state-(web|full)\b/.test(record.oldValue || ''))) schedule();
+  });
   const sizeObserver = new ResizeObserver(schedule);
   let observedPlayer;
   const observePlayerMode = () => {
@@ -1560,7 +1739,7 @@
     if (player !== observedPlayer) {
       playerModeObserver.disconnect();
       sizeObserver.disconnect();
-      if (player) playerModeObserver.observe(player, { attributes: true, attributeFilter: ['class'] });
+      if (player) playerModeObserver.observe(player, { attributes: true, subtree: true, attributeOldValue: true, attributeFilter: ['class'] });
       if (player) sizeObserver.observe(player);
       observedPlayer = player;
     }
@@ -1569,7 +1748,7 @@
   window.addEventListener('popstate', schedule);
   window.addEventListener('hashchange', schedule);
   window.addEventListener('resize', schedule, { passive: true });
-  document.addEventListener('fullscreenchange', layoutVisibility);
+  document.addEventListener('fullscreenchange', schedule);
   document.addEventListener('visibilitychange', () => { if (!document.hidden && !pageSuspended) syncHelper(); });
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', theme);
   window.addEventListener('pagehide', () => {

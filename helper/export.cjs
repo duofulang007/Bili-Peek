@@ -3,14 +3,22 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { cleanError } = require('./segment-download.cjs');
+const { needsRecognition, recognize } = require('./transcription.cjs');
+const { resolveOutput } = require('./vault-paths.cjs');
 
 function run(executable, args, timeout = 600000, onProgress) {
   return new Promise((resolve, reject) => {
     const options = typeof timeout === 'object' ? timeout : {};
     if (options.signal?.aborted) return reject(options.signal.reason);
-    const child = spawn(executable, args, { windowsHide: true, shell: false });
+    const child = spawn(executable, args, { windowsHide: true, shell: false, ...(options.env ? { env: { ...process.env, ...options.env } } : {}) });
     let output = '', progressBuffer = '', errors = '', failure, lastActivity = performance.now(), lastTime = -1, lastCounter = options.activity?.();
-    const stop = error => { failure = error; child.kill(); };
+    const stop = error => {
+      failure ||= error;
+      if (options.killTree && process.platform === 'win32' && child.pid && child.exitCode === null) {
+        const killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, shell: false, stdio: 'ignore' });
+        killer.on('error', () => child.kill());
+      } else child.kill();
+    };
     const abort = () => stop(options.signal.reason || new Error('任务已取消'));
     options.signal?.addEventListener('abort', abort, { once: true });
     const timer = options.idleMs ? setInterval(() => {
@@ -41,8 +49,11 @@ function run(executable, args, timeout = 600000, onProgress) {
 }
 
 function validateTask(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('任务参数无效');
+  if (input.setDefaultDirectory !== undefined && typeof input.setDefaultDirectory !== 'boolean') throw new Error('默认保存路径选项无效');
+  if (input.sourceHasSubtitles !== undefined && typeof input.sourceHasSubtitles !== 'boolean') throw new Error('源字幕状态无效');
   if (!/^(BV[0-9A-Za-z]{10}|av\d+)$/.test(input.id || '') || !Number.isSafeInteger(input.part) || input.part < 1 || !Number.isSafeInteger(input.cid) || input.cid <= 0) throw new Error('视频或分 P 标识无效');
-  if (!Number.isFinite(input.start) || !Number.isFinite(input.end) || input.start < 0 || input.end <= input.start || input.end > 43200 || input.end - input.start > 1800) throw new Error('截取范围无效，单次最多 30 分钟');
+  if (!Number.isFinite(input.start) || !Number.isFinite(input.end) || input.start < 0 || input.end <= input.start) throw new Error('截取范围无效：开始时间须非负，结束时间须大于开始时间');
   if (input.cutMode !== undefined && (input.cutMode !== 'keyframe' || input.downloadEngine !== 'nre')) throw new Error('快速截取仅支持分片下载');
   if (input.downloadQuality !== undefined && (!Number.isInteger(input.downloadQuality) || input.downloadQuality <= 0 || input.downloadQuality > 1000)) throw new Error('下载画质无效');
   for (const name of ['videoUrl', 'audioUrl']) {
@@ -50,6 +61,7 @@ function validateTask(input) {
     if (url.protocol !== 'https:' || url.username || url.password || !/(^|\.)bilivideo\.(com|cn)$/.test(url.hostname) || (url.port && url.port !== '443')) throw new Error('媒体地址无效');
   }
   if (!Array.isArray(input.subtitles) || input.subtitles.length > 30000 || (!input.subtitles.length && input.videoOnly !== true)) throw new Error('当前视频没有可用字幕，请确认只保存视频后重试');
+  if (input.subtitles.some(cue => !cue || !Number.isFinite(cue.from) || cue.from < 0 || !Number.isFinite(cue.to) || cue.to <= cue.from || typeof cue.content !== 'string' || cue.content.length > 10000)) throw new Error('字幕内容或时间格式无效');
   if (!Array.isArray(input.tags) || !input.tags.length || input.tags.length > 20 || input.tags.some(tag => typeof tag !== 'string' || !/^[\p{L}\p{N}_-]+(?:\/[\p{L}\p{N}_-]+)*$/u.test(tag) || /^\d+$/.test(tag) || tag.length > 100)) throw new Error('请填写至少一个有效标签后保存');
   if (input.summary !== undefined && (typeof input.summary !== 'string' || input.summary.length > 2000)) throw new Error('摘要最多 2000 字');
   return input;
@@ -124,9 +136,12 @@ async function exportClip(task, config, runner = run, onProgress = () => {}, ser
   };
   stage('prepare');
   validateTask(task);
+  if (config.videoEncoder !== undefined && !['libx264', 'h264_nvenc'].includes(config.videoEncoder)) throw new Error('视频编码配置无效');
+  if (config.nvencQuality !== undefined && (!Number.isInteger(config.nvencQuality) || config.nvencQuality < 1 || config.nvencQuality > 51)) throw new Error('硬件编码质量配置无效');
+  if (config.hardwareDecode !== undefined && typeof config.hardwareDecode !== 'boolean') throw new Error('硬件解码配置无效');
   let cues = selectCues(task.subtitles, task.start, task.end);
   if (!cues.length && task.videoOnly !== true) throw new Error('选区内没有字幕，请调整选区或确认只保存视频');
-  const output = path.resolve(config.output), key = keyFor(task);
+  const output = await resolveOutput(config, task.outputDirectory), key = keyFor(task);
   await fs.access(path.join(path.resolve(config.vault), '.obsidian'));
   const relative = path.relative(path.resolve(config.vault), output);
   if (relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('输出目录不在配置的仓库内');
@@ -148,10 +163,36 @@ async function exportClip(task, config, runner = run, onProgress = () => {}, ser
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
   const notePath = path.join(output, filename), videoPath = path.join(attachments, `${key}.mp4`);
   const result = { notePath, filename, key, hasSubtitles: cues.length > 0, obsidianUri: `obsidian://open?path=${encodeURIComponent(notePath)}` };
-  try {
-    await Promise.all([fs.access(notePath), fs.access(videoPath)]);
+  let duplicate = false;
+  try { await Promise.all([fs.access(notePath), fs.access(videoPath)]); duplicate = true; }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (duplicate) {
+    const existing = await fs.readFile(notePath, 'utf8');
+    if (/^(?:## 片段字幕|> \[!note\]- 片段字幕)\s*$/m.test(existing)) result.hasSubtitles = true;
+    else if (needsRecognition(task) && config.buzz) {
+      const sidecar = path.join(attachments, key + '.buzz.json');
+      try {
+        const saved = await fs.readFile(sidecar, 'utf8').then(JSON.parse).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+        if (saved) {
+          if (saved.engine !== 'Buzz' || !Array.isArray(saved.cues)) throw new Error('已保存的 Buzz 识别稿格式无效，请保留文件并排错');
+          result.recognition = { state: saved.cues.length ? 'complete' : 'empty', engine: 'Buzz', model: saved.model };
+        } else {
+          stage('transcribe');
+          const info = JSON.parse(await runner(config.ffprobe, ['-v', 'error', '-show_format', '-of', 'json', videoPath], 30000));
+          const duration = Number(info.format?.duration);
+          if (!Number.isFinite(duration) || duration <= 0) throw new Error('已保存视频的时长无效');
+          const recognized = await (services.recognize || recognize)(videoPath, duration, config, runner);
+          await services.checkpoint?.();
+          await fs.writeFile(sidecar, JSON.stringify({ ...recognized, sourceHasSubtitles: false, duration, created: new Date().toISOString() }), { flag: 'wx' });
+          result.recognition = { state: recognized.state, engine: 'Buzz', model: recognized.model };
+        }
+      } catch (error) {
+        if (/任务已取消/.test(error.message)) throw error;
+        result.recognition = { state: 'failed', engine: 'Buzz', error: cleanError(error) };
+      }
+    }
     return { ...result, duplicate: true };
-  } catch {}
+  }
   const temp = await fs.mkdtemp(path.join(attachments, '.pending-'));
   try {
     const tempVideo = path.join(temp, 'clip.mp4'); let duration = task.end - task.start;
@@ -171,13 +212,20 @@ async function exportClip(task, config, runner = run, onProgress = () => {}, ser
         result.actualStart = task.start; result.requestedStart = requestedStart;
       }
     }
-    const inputArgs = (url, origin = 0) => sources === task
+    const hardwareDecode = config.hardwareDecode === true && config.videoEncoder === 'h264_nvenc' && task.cutMode !== 'keyframe';
+    const decodeArgs = hardwareDecode ? ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda'] : [];
+    const inputArgs = (url, origin = 0, video = false) => [...(video ? decodeArgs : []), ...(sources === task
       ? ['-threads', '2', '-protocol_whitelist', 'https,tls,tcp,crypto', '-rw_timeout', '30000000', '-headers', headers, '-ss', String(task.start), '-i', url]
-      : ['-threads', '2', '-seek_timestamp', '1', '-ss', String(task.start + origin), '-i', url];
+      : ['-threads', '2', '-seek_timestamp', '1', '-ss', String(task.start + origin), '-i', url])];
     const progress = seconds => onProgress({ stage: currentStage, percent: Math.min(99, Math.max(0, Math.floor(seconds / duration * 100))), elapsedSeconds: Math.floor((performance.now() - began) / 1000) });
     stage('media');
-    const encoding = task.cutMode === 'keyframe' ? ['-c:v', 'copy', '-c:a', 'copy'] : ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-threads:v', String(mediaThreads), '-c:a', 'aac', '-b:a', '160k', '-threads:a', '1'];
-    await runner(config.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-filter_threads', '2', '-progress', 'pipe:1', '-stats_period', '1', ...inputArgs(sources.videoUrl, sources.videoOrigin), ...inputArgs(sources.audioUrl, sources.audioOrigin), '-map', '0:v:0', '-map', '1:a:0', '-t', String(duration), ...encoding, '-avoid_negative_ts', 'make_zero', '-movflags', '+faststart', tempVideo], { idleMs: 120000 }, progress);
+    const videoEncoding = config.videoEncoder === 'h264_nvenc'
+      ? ['-c:v', 'h264_nvenc', '-preset', 'p4', '-rc', 'vbr', '-cq', String(config.nvencQuality ?? 27), '-b:v', '0', ...(hardwareDecode ? ['-vf', 'scale_cuda=format=yuv420p', '-pix_fmt', 'cuda'] : ['-pix_fmt', 'yuv420p']), '-bf', '3']
+      : ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-threads:v', String(mediaThreads)];
+    const encoding = task.cutMode === 'keyframe' ? ['-c:v', 'copy', '-c:a', 'copy'] : [...videoEncoding, '-c:a', 'aac', '-b:a', '160k', '-threads:a', '1'];
+    result.videoEncoder = task.cutMode === 'keyframe' ? 'copy' : config.videoEncoder || 'libx264';
+    result.hardwareDecode = hardwareDecode;
+    await runner(config.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-filter_threads', '2', '-progress', 'pipe:1', '-stats_period', '1', ...inputArgs(sources.videoUrl, sources.videoOrigin, true), ...inputArgs(sources.audioUrl, sources.audioOrigin), '-map', '0:v:0', '-map', '1:a:0', '-t', String(duration), ...encoding, '-avoid_negative_ts', 'make_zero', '-movflags', '+faststart', tempVideo], { idleMs: 120000 }, progress);
     stage('probe');
     const probe = JSON.parse(await runner(config.ffprobe, ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', tempVideo], 30000));
     let check = mediaCheck(probe, duration);
@@ -195,14 +243,38 @@ async function exportClip(task, config, runner = run, onProgress = () => {}, ser
     if (check.atEnd) { cues = selectCues(task.subtitles, task.start, task.start + check.expected); result.hasSubtitles = cues.length > 0; }
     // Decode the result too; a readable container alone does not prove usable media.
     stage('verify');
-    await runner(config.ffmpeg, ['-v', 'error', '-xerror', '-nostdin', '-threads', '2', '-filter_threads', '2', '-progress', 'pipe:1', '-stats_period', '1', '-i', tempVideo, '-threads', '2', '-f', 'null', '-'], { idleMs: 120000 }, progress);
+    await runner(config.ffmpeg, ['-v', 'error', '-xerror', '-nostdin', ...decodeArgs, '-threads', '2', '-filter_threads', '2', '-progress', 'pipe:1', '-stats_period', '1', '-i', tempVideo, '-threads', '2', '-f', 'null', '-'], { idleMs: 120000 }, progress);
+    let recognition, recognitionText = '';
+    if (needsRecognition(task) && config.buzz) {
+      stage('transcribe');
+      try {
+        recognition = await (services.recognize || recognize)(tempVideo, measured, config, runner);
+        result.recognition = { state: recognition.state, engine: recognition.engine, model: recognition.model };
+        if (recognition.cues.length) {
+          const text = `来源：Buzz · ${recognition.model}。自动语音识别结果，不属于原视频字幕；时间从片段起点计算。\n\n${readingParagraphs(recognition.cues, true)}`;
+          recognitionText = '\n> [!note]- 语音识别稿\n' + text.split('\n').map(line => '> ' + line).join('\n') + '\n';
+          await fs.writeFile(path.join(temp, 'asr.json'), JSON.stringify({ engine: recognition.engine, model: recognition.model, sourceHasSubtitles: false, duration: measured, created: new Date().toISOString(), cues: recognition.cues, srt: recognition.srt }), 'utf8');
+        } else recognitionText = '\n> [!info] Buzz 未识别到可用语音，未生成识别稿。\n';
+      } catch (error) {
+        if (/任务已取消/.test(error.message)) throw error;
+        result.recognition = { state: 'failed', engine: 'Buzz', error: cleanError(error) };
+        recognition = undefined;
+        recognitionText = `\n> [!warning] Buzz 语音识别未完成\n> ${cleanError(error).replace(/\n/g, '\n> ')}\n> 视频仍正常保存；未生成识别稿。\n`;
+      }
+    }
     stage('write');
     await services.checkpoint?.();
     const ending = check.atEnd ? `\n> 视频到达源文件末尾，实际保存时长 ${measured.toFixed(2)} 秒；页面标示时长与源文件略有差异。\n` : '';
     const fastInfo = task.cutMode === 'keyframe' ? `\n> 快速截取：请求起点 ${stamp(requestedStart)}，实际关键帧起点 ${stamp(task.start)}；字幕按实际起点计时。\n` : '';
-    await fs.writeFile(path.join(temp, 'note.md'), note(task, cues, key) + ending + fastInfo, 'utf8');
+    let content = note(task, cues, key);
+    if (cues.length) content = content.replace(/## 片段字幕\n\n([\s\S]*)$/, (_, body) => '> [!note]- 片段字幕\n' + body.trimEnd().split('\n').map(line => '> ' + line).join('\n') + '\n');
+    if (typeof task.sourceHasSubtitles === 'boolean') content = content.replace('\n---\n\n', `\nsource_has_subtitles: ${task.sourceHasSubtitles}\n---\n\n`);
+    if (recognition?.cues.length) content = content.replace('未生成转录文字。', '语音识别稿另列下方，原视频没有字幕。');
+    const noteContent = content + ending + fastInfo + recognitionText + '\n## 我的笔记\n\n';
+    await services.backupNote?.(key, noteContent);
+    await fs.writeFile(path.join(temp, 'note.md'), noteContent, 'utf8');
     // Exclusive commits never overwrite existing notes or attachments.
-    const files = [['clip.mp4', videoPath], ['note.md', notePath]];
+    const files = [['clip.mp4', videoPath], ['note.md', notePath], ...(recognition?.cues.length ? [['asr.json', path.join(attachments, key + '.buzz.json')]] : [])];
     for (const [source, target] of files) {
       try { await fs.link(path.join(temp, source), target); }
       catch (error) {
@@ -217,14 +289,14 @@ async function exportClip(task, config, runner = run, onProgress = () => {}, ser
       }
     }
     for (const [filename] of files) await fs.unlink(path.join(temp, filename));
-    for (const filename of ['video.mp4', 'audio.mp4']) await fs.rm(path.join(temp, filename), { force: true });
+    for (const filename of ['video.mp4', 'audio.mp4', 'asr.json']) await fs.rm(path.join(temp, filename), { force: true });
     await fs.rmdir(temp);
     stage('complete');
     timings.total = +((performance.now() - began) / 1000).toFixed(2);
     return { ...result, duration: measured, timings };
   } catch (error) {
     try {
-      for (const filename of ['clip.mp4', 'note.md', 'video.mp4', 'audio.mp4']) await fs.unlink(path.join(temp, filename)).catch(err => { if (err.code !== 'ENOENT') throw err; });
+      for (const filename of ['clip.mp4', 'note.md', 'video.mp4', 'audio.mp4', 'asr.json']) await fs.unlink(path.join(temp, filename)).catch(err => { if (err.code !== 'ENOENT') throw err; });
       await fs.rmdir(temp);
     } catch { error.message += '；部分暂存文件未能清理'; }
     throw error;

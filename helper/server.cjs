@@ -5,6 +5,9 @@ const crypto = require('node:crypto');
 const { exportClip, validateTask, keyFor, run } = require('./export.cjs');
 const { downloadTracks, TransferControl, cleanError } = require('./segment-download.cjs');
 const { consumePairing, fingerprint } = require('./pairing.cjs');
+const { recognize } = require('./transcription.cjs');
+const { cacheManager } = require('./segment-cache.cjs');
+const { resolveOutput, listFolders } = require('./vault-paths.cjs');
 const configPath = process.env.BILI_PEEK_CONFIG || path.resolve(__dirname, '../.local/export-config.json');
 
 function signWbi(input) {
@@ -22,11 +25,14 @@ async function main({ configFile = configPath, exporter = exportClip, downloader
   if (typeof config.token !== 'string' || config.token.length < 32) throw new Error('请配置至少 32 字符的配对令牌');
   await Promise.all([fs.access(config.ffmpeg), fs.access(config.ffprobe), fs.access(path.join(config.vault, '.obsidian'))]);
   const directory = path.dirname(configFile);
+  config.segmentCacheRoot = path.join(directory, 'segment-cache');
+  const cache = cacheManager(config);
   config.segmentDownloader = path.resolve(__dirname, '../.tools/N_m3u8DL-RE.exe');
   const segmentAvailable = config.segmentNative !== false || await fs.access(config.segmentDownloader).then(() => true, () => false);
   const routes = new Map(), controls = new Map();
   const jobs = new Map(), active = new Map(), queue = [];
   let browserAcknowledged = 0, ready = false;
+  let settingsWrite = Promise.resolve();
   const pump = () => {
     // A shared video's range cache must have only one writer. Other videos can run together.
     while (active.size < 2) {
@@ -41,10 +47,35 @@ async function main({ configFile = configPath, exporter = exportClip, downloader
       };
       Promise.resolve().then(() => exporter(task, config, controlledRun, progress => jobs.set(key, { state: 'processing', ...progress }), {
         checkpoint: async () => { await control.wait(); control.canCancel = false; },
+        backupNote: async (key, content) => {
+          const backups = path.join(directory, 'export-notes');
+          await fs.mkdir(backups, { recursive: true });
+          try { await fs.writeFile(path.join(backups, key + '.md'), content, { flag: 'wx' }); }
+          catch (error) { if (error.code !== 'EEXIST') throw error; }
+        },
+        recognize: async (video, duration) => {
+          const c = control.controller();
+          try { return await recognize(video, duration, config, controlledRun, c.signal); }
+          finally { control.release(c); }
+        },
         download: (task, work, progress) => downloader(task, config, run, progress, control, routes, work)
-      })).then(result => {
-        jobs.set(key, { state: 'complete', ...result });
-        if (result.timings) fs.appendFile(path.resolve(__dirname, '../.local/export-timings.jsonl'), JSON.stringify({ at: new Date().toISOString(), key, duration: result.duration, timings: result.timings, ...(result.download ? { download: result.download } : {}) }) + '\n').catch(() => {});
+      })).then(async result => {
+        if (task.setDefaultDirectory) {
+          const update = settingsWrite.then(async () => {
+            const latest = JSON.parse(await fs.readFile(configFile, 'utf8'));
+            const output = await resolveOutput(config, task.outputDirectory);
+            const temporary = configFile + '.' + crypto.randomBytes(6).toString('hex') + '.tmp';
+            try {
+              await fs.writeFile(temporary, JSON.stringify({ ...latest, output }, null, 2));
+              await fs.rename(temporary, configFile);
+              config.output = output;
+            } finally { await fs.rm(temporary, { force: true }); }
+          });
+          settingsWrite = update.catch(() => {});
+          try { await update; } catch (error) { result.defaultDirectoryError = cleanError(error); }
+        }
+        jobs.set(key, { state: 'complete', ...result, completedAt: Date.now() });
+        if (result.timings) fs.appendFile(path.resolve(__dirname, '../.local/export-timings.jsonl'), JSON.stringify({ at: new Date().toISOString(), key, duration: result.duration, videoEncoder: result.videoEncoder, hardwareDecode: result.hardwareDecode, timings: result.timings, ...(result.download ? { download: result.download } : {}) }) + '\n').catch(() => {});
       }, error => jobs.set(key, { state: control.cancelled ? 'cancelled' : 'failed', error: cleanError(error) })).finally(() => { active.delete(key); controls.delete(key); pump(); });
     }
     queue.forEach(({ key }, index) => jobs.set(key, { state: 'processing', stage: 'queued', percent: 0, queuePosition: index + 1, canPause: false }));
@@ -59,6 +90,10 @@ async function main({ configFile = configPath, exporter = exportClip, downloader
     }
     const supplied = Buffer.from(req.headers['x-bili-peek-token'] || ''), expected = Buffer.from(config.token);
     if (supplied.length !== expected.length || !crypto.timingSafeEqual(supplied, expected)) return send(401, { error: '配对令牌无效' });
+    if (req.method === 'GET' && req.url === '/folders') {
+      try { return send(200, await listFolders(config)); }
+      catch (error) { return send(500, { error: cleanError(error) }); }
+    }
     if (req.method === 'GET' && req.url === '/health') {
       if (req.headers['x-bili-peek-client'] === 'userscript' && Date.now() - browserAcknowledged > 10000) {
         try {
@@ -66,7 +101,7 @@ async function main({ configFile = configPath, exporter = exportClip, downloader
           browserAcknowledged = Date.now();
         } catch { return send(500, { error: '无法保存浏览器连接状态' }); }
       }
-      return send(200, { ready, active: active.size > 0 || queue.length > 0, activeCount: active.size, queuedCount: queue.length, pid: process.pid, segmentAvailable });
+      return send(200, { ready, active: active.size > 0 || queue.length > 0, activeCount: active.size, queuedCount: queue.length, pid: process.pid, segmentAvailable, videoEncoder: config.videoEncoder || 'libx264', hardwareDecode: config.hardwareDecode === true && config.videoEncoder === 'h264_nvenc' });
     }
     if (req.method === 'GET' && /^\/jobs\/[a-f0-9]{20}$/.test(req.url)) return send(200, jobs.get(req.url.slice(6)) || { state: 'missing' });
     const action = /^\/jobs\/([a-f0-9]{20})\/(pause|resume|cancel)$/.exec(req.url);
@@ -92,7 +127,10 @@ async function main({ configFile = configPath, exporter = exportClip, downloader
       for await (const chunk of req) { size += chunk.length; if (size > 4000000) { send(413, { error: '字幕数据过大' }); return; } chunks.push(chunk); }
       const input = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       if (req.url === '/sign-wbi') return send(200, { query: signWbi(input) });
-      const task = validateTask(input), key = keyFor(task);
+      const task = validateTask(input);
+      const output = await resolveOutput(config, task.outputDirectory);
+      task.outputDirectory = path.relative(path.resolve(config.vault), output).split(path.sep).join('/') || '.';
+      const key = crypto.createHash('sha256').update(keyFor(task) + '\0' + output).digest('hex').slice(0, 20);
       if (task.downloadEngine && task.downloadEngine !== 'nre') throw new Error('下载方式无效');
       if (task.downloadEngine === 'nre' && !segmentAvailable) throw new Error('分片下载工具尚未安装');
       if (controls.has(key)) return send(202, { key });
@@ -103,11 +141,19 @@ async function main({ configFile = configPath, exporter = exportClip, downloader
     } catch (error) { send(400, { error: error.message }); }
   });
   server.requestTimeout = 30000;
+  let cacheTimer;
+  server.on('close', () => clearInterval(cacheTimer));
   server.on('error', error => { console.error(error.code === 'EADDRINUSE' ? '片段助手端口已占用，请检查是否已启动助手。' : error.message); process.exitCode = 1; });
   server.listen(config.port || 18766, '127.0.0.1', async () => {
-    try { await fs.writeFile(path.join(directory, 'helper.pid'), String(process.pid)); }
+    try {
+      // Bind first: a duplicate helper must never clean a running helper's cache.
+      await cache.prune();
+      await fs.writeFile(path.join(directory, 'helper.pid'), String(process.pid));
+    }
     catch (error) { console.error(error.message); server.close(); process.exitCode = 1; return; }
     ready = true;
+    cacheTimer = setInterval(() => cache.prune().catch(error => console.error('分片缓存维护失败：' + cleanError(error))), 600000);
+    cacheTimer.unref();
     console.log(`Bili-Peek 助手已启动，保存目录：${config.output}`);
   });
   return server;

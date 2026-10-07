@@ -1,6 +1,14 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { mergeWatchRanges, watchedAdvance } = require('../Bili-Peek.user.js');
+test('saving watch history merges another tab instead of overwriting its intervals', () => {
+  const source = require('node:fs').readFileSync(require.resolve('../Bili-Peek.user.js'), 'utf8');
+  const vm = require('node:vm'); let saved;
+  const state = { watchDirty: true, watchRoute: 'BVtest:p1', watchRanges: [[10, 12]], mergeWatchRanges, performance,
+    GM_getValue: () => ({ 'BVtest:p1': { ranges: [[2, 4]] } }), GM_setValue: (_, value) => { saved = value; } };
+  vm.createContext(state); vm.runInContext(source.slice(source.indexOf('  function saveWatch()'), source.indexOf('  function ensureWatchRoute()')), state);
+  state.saveWatch(); assert.deepEqual(saved['BVtest:p1'].ranges, [[2, 4], [10, 12]]);
+});
 test('watch intervals merge overlaps but preserve skipped gaps and reject corrupt history', () => {
   assert.deepEqual(mergeWatchRanges([[2, 4], [10, 12], [NaN, 5], [-1, 2]], 3.5, 6), [[2, 6], [10, 12]]);
   assert.deepEqual(mergeWatchRanges([[2, 6]], 6.01, 7), [[2, 7]]);
